@@ -18,8 +18,8 @@ pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
         Constraint::Length(4), // KPI strip
         Constraint::Length(3), // phase
         Constraint::Length(6), // gauges + scorecard
-        Constraint::Min(4),    // oscilloscope
-        Constraint::Length(6), // workloads + interpretation
+        Constraint::Min(6),    // oscilloscope (shrinks first on small terminals)
+        Constraint::Length(8), // workloads + interpretation (room to wrap)
     ])
     .split(area);
 
@@ -306,12 +306,16 @@ fn render_workloads(f: &mut Frame, area: Rect, snap: &speedtest::Snapshot) {
     let block = titled_block("WORKLOAD READINESS MATRIX (LoL/FFXIV/4K/AI)");
     let inner = block.inner(area);
     f.render_widget(block, area);
+    let w = inner.width as usize;
     let mut lines = Vec::new();
     for (name, verdict, ok) in &snap.workloads {
-        lines.push(Line::from(Span::styled(
-            format!("▸ {:<20}: {}", name, verdict),
-            if *ok { good() } else { alert() },
-        )));
+        let st = if *ok { good() } else { alert() };
+        let full = format!("▸ {:<20}: {}", name, verdict);
+        for (i, wl) in wrap_text(&full, w).into_iter().enumerate() {
+            // Indent continuation lines so wrapped verdicts stay readable.
+            let text = if i == 0 { wl } else { format!("    {wl}") };
+            lines.push(Line::from(Span::styled(text, st)));
+        }
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -320,19 +324,45 @@ fn render_interpretation(f: &mut Frame, area: Rect, snap: &speedtest::Snapshot) 
     let block = titled_block("BOTTLENECK INTERPRETATION & VERDICT");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let lines: Vec<Line> = snap
-        .interpretation
-        .iter()
-        .map(|s| {
-            let lc = s.to_lowercase();
-            let style = if lc.contains("safe") || lc.contains("headroom") || lc.contains("optimal")
-            {
-                good()
-            } else {
-                amber()
-            };
-            Line::from(Span::styled(s.clone(), style))
-        })
-        .collect();
+    let w = inner.width as usize;
+    let mut lines = Vec::new();
+    for s in &snap.interpretation {
+        let lc = s.to_lowercase();
+        let style = if lc.contains("safe") || lc.contains("headroom") || lc.contains("optimal") {
+            good()
+        } else {
+            amber()
+        };
+        for (i, wl) in wrap_text(s, w).into_iter().enumerate() {
+            let text = if i == 0 { wl } else { format!("   {wl}") };
+            lines.push(Line::from(Span::styled(text, style)));
+        }
+    }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Minimal greedy word-wrap for a single paragraph.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(12);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let cand = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
+        if cand.chars().count() <= width {
+            cur = cand;
+        } else {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur = word.to_string();
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }

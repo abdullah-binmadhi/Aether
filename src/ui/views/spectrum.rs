@@ -132,7 +132,14 @@ fn render_heatmap(f: &mut Frame, rs: &RenderState, area: Rect) {
     for r in &data {
         let filled = ((r.count as f64 / busiest as f64) * bar_w as f64).round() as usize;
         let filled = filled.min(bar_w);
-        let gbar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
+        // Clear blocks show an empty track (spaces), not a dim ░ bar — a clear
+        // channel should read as clear, not as noise.
+        let track = if r.count == 0 { ' ' } else { '░' };
+        let gbar = format!(
+            "{}{}",
+            "█".repeat(filled),
+            track.to_string().repeat(bar_w - filled)
+        );
         let (state, style) = if r.colliding {
             ("[!] COLLISION", alert())
         } else if r.mine {
@@ -180,10 +187,10 @@ fn render_neighbors(f: &mut Frame, rs: &RenderState, area: Rect) {
     f.render_widget(block, area);
     let w = inner.width as usize;
 
-    // Signal-strength rank chart: strongest first, one RSSI bar per network,
-    // your AP in bold, co-channel neighbours in red. Fills every row the panel
-    // has instead of a short list with dead space below.
-    let bar_w = w.saturating_sub(48).clamp(8, 50);
+    // Each network is a 2-line card: a name/channel line + a full-width RSSI bar
+    // line with extra RF detail. With few APs this fills the tall panel far
+    // better than a one-line list; it compacts to 1 line each when crowded.
+    let bar_w = w.saturating_sub(24).clamp(10, 64);
     let rssi_bar = |dbm: i64| -> String {
         let ratio = ((dbm as f64 + 95.0) / 55.0).clamp(0.0, 1.0); // -95..-40
         let filled = (ratio * bar_w as f64).round() as usize;
@@ -193,40 +200,82 @@ fn render_neighbors(f: &mut Frame, rs: &RenderState, area: Rect) {
             "░".repeat(bar_w - filled.min(bar_w))
         )
     };
+    let quality = |dbm: i64| -> &'static str {
+        match dbm {
+            d if d >= -55 => "excellent",
+            d if d >= -67 => "good",
+            d if d >= -75 => "fair",
+            _ => "weak",
+        }
+    };
 
-    let mut lines = vec![Line::from(Span::styled(
-        format!("{:<22} {:<13} SIGNAL", "NETWORK", "CHANNEL/BAND"),
-        amber_bold(),
-    ))];
-
-    // Active AP always first.
-    lines.push(Line::from(Span::styled(
-        format!(
-            "● {:<20} {:<13} {} {:>4}dBm",
-            truncate(&tel.ssid, 20),
-            truncate(&tel.channel_label, 13),
-            rssi_bar(tel.signal_dbm),
-            tel.signal_dbm
-        ),
-        good(),
-    )));
-
-    // Neighbours sorted by signal strength (descending).
+    // Ordered list: your AP first, then neighbours by signal (desc).
     let mut neigh: Vec<&crate::core::model::Neighbor> = tel.neighbors.iter().collect();
     neigh.sort_by_key(|a| std::cmp::Reverse(a.signal_dbm));
-    let cap = (inner.height as usize).saturating_sub(3);
+
+    // Decide 2-line vs 1-line based on how many we must show vs height.
+    let total = 1 + neigh.len();
+    let avail = (inner.height as usize).saturating_sub(1); // reserve footer
+    let two_line = total * 2 <= avail;
+
+    let mut lines = Vec::new();
+    let push_card =
+        |lines: &mut Vec<Line>, name: String, chan: String, dbm: i64, mine: bool, same: bool| {
+            let head_style = if mine {
+                good()
+            } else if same {
+                alert()
+            } else {
+                amber_bold()
+            };
+            let dot = if mine { "●" } else { " " };
+            let tag = if mine {
+                "  (YOU)"
+            } else if same {
+                "  (co-channel!)"
+            } else {
+                ""
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{dot} {:<26} {:<16} {:>4} dBm{tag}",
+                    truncate(&name, 26),
+                    chan,
+                    dbm
+                ),
+                head_style,
+            )));
+            if two_line {
+                let body_style = if same { alert() } else { amber() };
+                lines.push(Line::from(Span::styled(
+                    format!("  {} {}", rssi_bar(dbm), quality(dbm)),
+                    body_style,
+                )));
+            }
+        };
+
+    push_card(
+        &mut lines,
+        tel.ssid.clone(),
+        tel.channel_label.clone(),
+        tel.signal_dbm,
+        true,
+        false,
+    );
+    let cap = if two_line {
+        avail.saturating_sub(2) / 2
+    } else {
+        avail.saturating_sub(1)
+    };
     for n in neigh.iter().take(cap) {
-        let style = if n.same_channel { alert() } else { amber() };
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  {:<20} {:<13} {} {:>4}dBm",
-                truncate(&n.label, 20),
-                format!("{} ({})", n.channel_num, n.band.label()),
-                rssi_bar(n.signal_dbm),
-                n.signal_dbm
-            ),
-            style,
-        )));
+        push_card(
+            &mut lines,
+            n.label.clone(),
+            format!("Ch{} {}", n.channel_num, n.band.label()),
+            n.signal_dbm,
+            false,
+            n.same_channel,
+        );
     }
 
     // Footer summary anchor.

@@ -117,27 +117,72 @@ fn render_rf_gauges(f: &mut Frame, rs: &RenderState, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Tile 2: tall latency oscilloscope (RTT vertical block graph + down/up sparks).
+/// Tile 2: tall oscilloscope. [M] / [ ] cycles which series it plots so the key
+/// has an obvious visible effect on Overview:
+///   1 = LATENCY (RTT)   2 = DOWNLOAD   3 = UPLOAD   4 = COMBINED
 fn render_oscilloscope(f: &mut Frame, rs: &RenderState, area: Rect) {
     use crate::ui::theme::sparkline;
-    let block = titled_block("LATENCY OSCILLOSCOPE");
+    let mode = ((rs.visual_mode.wrapping_sub(1)) % 4) + 1;
+    let (title, series, floor, max, unit, scolor): (&str, &[f64], f64, f64, &str, _) = match mode {
+        2 => (
+            "THROUGHPUT OSCILLOSCOPE ▼ DOWNLOAD  [M] switch view",
+            &rs.scope_down_history,
+            0.0,
+            rs.scope_down_history
+                .iter()
+                .cloned()
+                .fold(10.0_f64, f64::max),
+            "K",
+            good(),
+        ),
+        3 => (
+            "THROUGHPUT OSCILLOSCOPE ▲ UPLOAD  [M] switch view",
+            &rs.scope_up_history,
+            0.0,
+            rs.scope_up_history.iter().cloned().fold(10.0_f64, f64::max),
+            "K",
+            amber_bold(),
+        ),
+        4 => (
+            "COMBINED OSCILLOSCOPE (RTT + ▼▲)  [M] switch view",
+            &rs.scope_rtt_history,
+            0.0,
+            50.0,
+            "m",
+            amber(),
+        ),
+        _ => (
+            "LATENCY OSCILLOSCOPE (RTT)  [M] switch view",
+            &rs.scope_rtt_history,
+            0.0,
+            50.0,
+            "m",
+            amber(),
+        ),
+    };
+
+    let block = titled_block(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 3 {
         return;
     }
     let w = inner.width as usize;
-    // Reserve 3 lines for the header + down/up sparks; rest is the RTT graph.
+    // Reserve 3 lines for the header + down/up sparks; rest is the main graph.
     let graph_h = (inner.height as usize).saturating_sub(3).max(2);
     let mut lines = vec![Line::from(Span::styled(
         format!(
-            "PING {:.1}ms · Jit {:.1}ms · Loss {:.1}%",
-            rs.scope_avg_ms, rs.scope_jitter_ms, rs.scope_loss_pct
+            "PING {:.1}ms · Jit {:.1}ms · Loss {:.1}% · ▼{:.0}K ▲{:.0}K",
+            rs.scope_avg_ms,
+            rs.scope_jitter_ms,
+            rs.scope_loss_pct,
+            rs.scope_down_kbs,
+            rs.scope_up_kbs
         ),
         amber_bold(),
     ))];
-    for g in render_2d_vertical_graph(&rs.scope_rtt_history, graph_h, w, 0.0, 50.0, "m") {
-        lines.push(Line::from(Span::styled(g, amber())));
+    for g in render_2d_vertical_graph(series, graph_h, w, floor, max, unit) {
+        lines.push(Line::from(Span::styled(g, scolor)));
     }
     let sw = w.saturating_sub(14).max(8);
     lines.push(Line::from(Span::styled(
@@ -234,14 +279,13 @@ fn render_advice(f: &mut Frame, rs: &RenderState, area: Rect) {
     let label = rs.telemetry.health_rating.label();
 
     let mut lines = Vec::new();
-    // Clean gauge header: 3-row big-block number + meter, never stray ticks.
+    // Clean gauge header: a meter line on top, then 3-row big-block digits beside
+    // the score/label — no crowding, never stray ticks.
     if inner.height >= 6 {
         let digits = crate::ui::widgets::big_number(score);
-        let meter = crate::ui::widgets::score_meter(score, w.saturating_sub(18).clamp(8, 40));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{}  ", digits[0]), style),
-            Span::styled(meter, style),
-        ]));
+        let meter = crate::ui::widgets::score_meter(score, w.saturating_sub(4).clamp(10, 50));
+        lines.push(Line::from(Span::styled(meter, style)));
+        lines.push(Line::from(Span::styled(digits[0].clone(), style)));
         lines.push(Line::from(vec![
             Span::styled(format!("{}  ", digits[1]), style),
             Span::styled(format!("{score}/100  {label}"), style),
@@ -261,11 +305,21 @@ fn render_advice(f: &mut Frame, rs: &RenderState, area: Rect) {
     for l in wrap_text(&analysis.recommended_action, w) {
         lines.push(Line::from(Span::styled(l, good())));
     }
-    // One supporting analysis line.
-    if let Some(l) = analysis.analysis_lines.first() {
+    // Supporting analysis lines — fill the remaining panel height (wrapped),
+    // leaving one row for the workload badge strip.
+    let budget = (inner.height as usize).saturating_sub(lines.len() + 1);
+    let mut used = 0usize;
+    for l in &analysis.analysis_lines {
         let st = if l.contains("[!]") { alert() } else { amber() };
         for wl in wrap_text(l, w) {
+            if used >= budget {
+                break;
+            }
             lines.push(Line::from(Span::styled(wl, st)));
+            used += 1;
+        }
+        if used >= budget {
+            break;
         }
     }
 

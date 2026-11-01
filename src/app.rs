@@ -792,8 +792,8 @@ impl App {
             VisualNext => {
                 self.visual_mode = (self.visual_mode % 4) + 1;
                 self.status_msg = format!(
-                    "Switched Visual Telemetry Deck -> [{}]",
-                    visual_name(self.visual_mode)
+                    "Oscilloscope view -> [{}]",
+                    oscilloscope_name(self.visual_mode)
                 );
             }
             VisualPrev => {
@@ -803,8 +803,8 @@ impl App {
                     self.visual_mode - 1
                 };
                 self.status_msg = format!(
-                    "Switched Visual Telemetry Deck -> [{}]",
-                    visual_name(self.visual_mode)
+                    "Oscilloscope view -> [{}]",
+                    oscilloscope_name(self.visual_mode)
                 );
             }
             Confirm => self.action_confirm(),
@@ -1438,6 +1438,16 @@ fn visual_name(m: u8) -> &'static str {
         2 => "2:2D RF SIGNAL & SNR CHRONOGRAPH",
         3 => "3:802.11 QAM CONSTELLATION & MIMO",
         _ => "4:KERNEL TCP SOCKET & PORT MATRIX",
+    }
+}
+
+/// Name of the Overview oscilloscope view selected by [M] / [ / ].
+fn oscilloscope_name(m: u8) -> &'static str {
+    match ((m.wrapping_sub(1)) % 4) + 1 {
+        1 => "LATENCY (RTT)",
+        2 => "DOWNLOAD THROUGHPUT",
+        3 => "UPLOAD THROUGHPUT",
+        _ => "COMBINED",
     }
 }
 

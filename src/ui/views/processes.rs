@@ -11,17 +11,25 @@ use crate::ui::theme::{alert, amber, amber_bold, bar, good, invert};
 use crate::ui::{draw_kpi_strip, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
+    // KPI strip · process table (sized to rows) · TOP TALKERS chart ·
+    // (selected detail + LAN map). The chart absorbs the space the short table
+    // used to leave empty.
+    let n = rs.processes.len().max(1);
+    // Table height = header(2) + rows, capped so the chart + detail still fit.
+    let table_h = (n as u16 + 2).clamp(6, 16);
     let rows = Layout::vertical([
         Constraint::Length(4),
-        Constraint::Min(6),
+        Constraint::Length(table_h),
+        Constraint::Min(5),
         Constraint::Length(8),
     ])
     .split(area);
     draw_kpi(f, rs, rows[0]);
     render_table(f, rs, rows[1]);
+    render_top_talkers(f, rs, rows[2]);
 
     let bot =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[2]);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[3]);
     render_detail(f, rs, bot[0]);
     render_lan(f, rs, bot[1]);
 }
@@ -116,6 +124,11 @@ fn render_table(f: &mut Frame, rs: &RenderState, area: Rect) {
             "● LIVE"
         };
         let load = p.down_kbs + p.up_kbs * 2.5;
+        // LOAD: solid-only bar (no dim ░ trail) so idle processes show almost
+        // nothing and a real talker visibly stands out — the old ░-filled bar
+        // read as one grey rectangle for the many near-zero rows.
+        let load_cells = ((load / 2000.0).clamp(0.0, 1.0) * 10.0).round() as usize;
+        let load_bar = format!("{:<10}", "█".repeat(load_cells.min(10)));
         let line = format!(
             "{} {:<8} {:<20} {:>8.1} KB  {:>8.1} KB {:>7.1} MB  {}  {}",
             ptr,
@@ -124,7 +137,7 @@ fn render_table(f: &mut Frame, rs: &RenderState, area: Rect) {
             p.down_kbs,
             p.up_kbs,
             p.total_mb,
-            bar(load, 0.0, 2000.0, 10),
+            load_bar,
             state
         );
         let style = if selected {
@@ -142,7 +155,51 @@ fn render_table(f: &mut Frame, rs: &RenderState, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Selected-process detail tile: up/down split gauges + session + state.
+/// Middle tile: horizontal bar chart of the top talkers by session data, so the
+/// space the short table used to waste now shows a real distribution chart.
+fn render_top_talkers(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let block = titled_block("TOP TALKERS — SESSION DATA (MB)");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let w = inner.width as usize;
+
+    let mut procs: Vec<&crate::core::procmon::ProcSample> = rs.processes.iter().collect();
+    procs.sort_by(|a, b| {
+        b.total_mb
+            .partial_cmp(&a.total_mb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let max_mb = procs.first().map(|p| p.total_mb).unwrap_or(1.0).max(1.0);
+    let name_w = 16usize;
+    let bar_w = w.saturating_sub(name_w + 14).clamp(8, 60);
+
+    let cap = (inner.height as usize).max(1);
+    let mut lines = Vec::new();
+    for p in procs.iter().take(cap) {
+        let filled = ((p.total_mb / max_mb) * bar_w as f64).round() as usize;
+        let filled = filled.min(bar_w);
+        let gbar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
+        let style = if p.is_hog {
+            alert()
+        } else if p.total_mb >= max_mb * 0.5 {
+            amber_bold()
+        } else {
+            amber()
+        };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{:<name_w$} {gbar} {:>7.1} MB",
+                truncate(&p.name, name_w),
+                p.total_mb
+            ),
+            style,
+        )));
+    }
+    if procs.is_empty() {
+        lines.push(Line::from(Span::styled("  (sampling…)", amber())));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
 fn render_detail(f: &mut Frame, rs: &RenderState, area: Rect) {
     let block = titled_block("SELECTED PROCESS");
     let inner = block.inner(area);
