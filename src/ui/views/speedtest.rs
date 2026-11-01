@@ -7,27 +7,30 @@ use ratatui::Frame;
 
 use crate::core::speedtest;
 use crate::render::RenderState;
-use crate::ui::theme::{alert, amber, amber_bold, bar, good, sparkline};
-use crate::ui::titled_block;
+use crate::ui::theme::{alert, amber, amber_bold, bar, good, score_color, sparkline};
+use crate::ui::{draw_kpi_strip, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
     let st = &rs.speedtest;
     let snap = &rs.speedtest_snapshot;
 
     let rows = Layout::vertical([
+        Constraint::Length(4), // KPI strip
         Constraint::Length(3), // phase
-        Constraint::Length(7), // gauges + scorecard
+        Constraint::Length(6), // gauges + scorecard
         Constraint::Min(4),    // oscilloscope
-        Constraint::Length(7), // workloads + interpretation
+        Constraint::Length(6), // workloads + interpretation
     ])
     .split(area);
+
+    draw_kpi(f, rs, rows[0]);
 
     // Phase bar.
     let is_running = st.is_running;
     let phase_block =
         titled_block("SPEED, BUFFERBLOAT & WORKLOAD LAB ([Space] Full │ [V] 5s │ [N] Apple RPM)");
-    let pi = phase_block.inner(rows[0]);
-    f.render_widget(phase_block, rows[0]);
+    let pi = phase_block.inner(rows[1]);
+    f.render_widget(phase_block, rows[1]);
     let phase_txt = format!("{} {}", bar(st.progress_pct, 0.0, 100.0, 18), st.phase_name);
     let phase_style = if phase_txt.contains("[OK]") || is_running {
         good()
@@ -41,14 +44,14 @@ pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
 
     // Gauges + scorecard.
     let mid =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[2]);
     render_gauges(f, rs, mid[0], snap);
     render_scorecard(f, rs, mid[1]);
 
     // Oscilloscope.
     let scope_block = titled_block("REAL-TIME THROUGHPUT & LOADED PING OSCILLOSCOPE");
-    let si = scope_block.inner(rows[2]);
-    f.render_widget(scope_block, rows[2]);
+    let si = scope_block.inner(rows[3]);
+    f.render_widget(scope_block, rows[3]);
     let spark_w = (si.width as usize).saturating_sub(18).max(12);
     let scope_lines = vec![
         Line::from(Span::styled(
@@ -80,9 +83,56 @@ pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
 
     // Workloads + interpretation.
     let bot =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[3]);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[4]);
     render_workloads(f, bot[0], snap);
     render_interpretation(f, bot[1], snap);
+}
+
+fn draw_kpi(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let st = &rs.speedtest;
+    // Grade -> pseudo-score for colour accent.
+    let g = st.bufferbloat_grade.chars().next().unwrap_or('-');
+    let grade_accent = match g {
+        'A' | 'B' => good(),
+        'C' => amber_bold(),
+        '-' => amber_bold(),
+        _ => alert(),
+    };
+    let cards = [
+        Kpi {
+            title: "▼ DOWN",
+            value: format!("{:.0}", st.down_mbps),
+            unit: "Mbps",
+            history: &st.down_history,
+            floor: 0.0,
+            accent: Some(good()),
+        },
+        Kpi {
+            title: "▲ UP",
+            value: format!("{:.0}", st.up_mbps),
+            unit: "Mbps",
+            history: &st.up_history,
+            floor: 0.0,
+            accent: None,
+        },
+        Kpi {
+            title: "BLOAT",
+            value: st.bufferbloat_grade.to_string(),
+            unit: "grade",
+            history: &st.rtt_history,
+            floor: 0.0,
+            accent: Some(grade_accent),
+        },
+        Kpi {
+            title: "RPM",
+            value: format!("{}", st.rpm_score),
+            unit: "score",
+            history: &[st.rpm_score as f64],
+            floor: 0.0,
+            accent: Some(score_color((st.rpm_score / 10).clamp(0, 100))),
+        },
+    ];
+    draw_kpi_strip(f, area, &cards);
 }
 
 fn render_gauges(f: &mut Frame, rs: &RenderState, area: Rect, snap: &speedtest::Snapshot) {

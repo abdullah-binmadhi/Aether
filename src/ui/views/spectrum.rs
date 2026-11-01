@@ -7,14 +7,73 @@ use ratatui::Frame;
 
 use crate::core::spectrum;
 use crate::render::RenderState;
-use crate::ui::theme::{alert, amber, amber_bold, bar, good};
-use crate::ui::titled_block;
+use crate::ui::theme::{alert, amber, amber_bold, bar, good, score_color};
+use crate::ui::{draw_kpi_strip, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
-    let rows =
-        Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area);
-    render_heatmap(f, rs, rows[0]);
-    render_neighbors(f, rs, rows[1]);
+    let rows = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Percentage(46),
+        Constraint::Min(5),
+    ])
+    .split(area);
+    draw_kpi(f, rs, rows[0]);
+    render_heatmap(f, rs, rows[1]);
+    render_neighbors(f, rs, rows[2]);
+}
+
+fn draw_kpi(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let tel = &rs.telemetry;
+    let rep = &rs.spectrum;
+    // No stored RF score on the report; derive a simple airspace cleanliness
+    // score: start at 100, penalise collisions and heavy neighbour density.
+    let neighbors = tel.neighbors.len() as i64;
+    let rf_score = (100 - rep.collisions.len() as i64 * 25 - (neighbors / 3).min(20)).clamp(0, 100);
+    let sig_hist = &rs.socket_sample.signal_history;
+    let empty: Vec<f64> = Vec::new();
+    let cards = [
+        Kpi {
+            title: "RF HEALTH",
+            value: format!("{}/100", rf_score),
+            unit: if rep.collisions.is_empty() {
+                "CLEAN"
+            } else {
+                "CLASH"
+            },
+            history: sig_hist,
+            floor: -95.0,
+            accent: Some(score_color(rf_score)),
+        },
+        Kpi {
+            title: "CHANNEL",
+            value: format!("{}", tel.channel_num),
+            unit: tel.band.label(),
+            history: &empty,
+            floor: 0.0,
+            accent: None,
+        },
+        Kpi {
+            title: "WIDTH",
+            value: format!("{}", if tel.width_mhz > 0 { tel.width_mhz } else { 80 }),
+            unit: "MHz",
+            history: &empty,
+            floor: 0.0,
+            accent: None,
+        },
+        Kpi {
+            title: "NEIGHBORS",
+            value: format!("{}", neighbors),
+            unit: "APs",
+            history: &empty,
+            floor: 0.0,
+            accent: if rep.collisions.is_empty() {
+                None
+            } else {
+                Some(alert())
+            },
+        },
+    ];
+    draw_kpi_strip(f, area, &cards);
 }
 
 fn render_heatmap(f: &mut Frame, rs: &RenderState, area: Rect) {

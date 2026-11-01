@@ -34,6 +34,82 @@ fn mcs_info(mcs: i64) -> (&'static str, &'static str, i64, usize, usize, i64) {
     }
 }
 
+/// A multi-row semicircle arc gauge for a 0..100 score. Returns `rows` lines
+/// (plus the value/label are drawn by the caller). This is the bigger sibling of
+/// `health_dial_line` for pages that have vertical room (KPI tiles, speedtest).
+///
+/// The arc is drawn with braille-ish block glyphs across `rows` stacked bands;
+/// each band lights up to the proportion of the score it covers.
+pub fn arc_gauge(score: i64, rows: usize) -> Vec<String> {
+    let rows = rows.clamp(2, 5);
+    let score = score.clamp(0, 100);
+    // Width of the arc grows with rows so it stays roughly semicircular.
+    let width = rows * 4 + 1;
+    let frac = score as f64 / 100.0;
+    let mut out = Vec::with_capacity(rows);
+    for r in 0..rows {
+        // Band r covers the vertical slice [r/rows, (r+1)/rows] of a semicircle.
+        // Compute the half-angle span lit at this height.
+        let y = 1.0 - (r as f64 + 0.5) / rows as f64; // 1=top .. 0=bottom
+                                                      // x extent of the semicircle at height y (unit circle): sqrt(1-y^2).
+        let half = (1.0 - y * y).max(0.0).sqrt();
+        let total_cells = ((half * width as f64).round() as usize).max(1);
+        let lit = ((frac * total_cells as f64).round() as usize).min(total_cells);
+        let pad = (width - total_cells) / 2;
+        let mut line = String::new();
+        line.push_str(&" ".repeat(pad));
+        line.push_str(&"◝".repeat(lit));
+        line.push_str(&"·".repeat(total_cells - lit));
+        out.push(line);
+    }
+    out
+}
+
+/// A labelled horizontal gauge row: `LABEL  ███████░░░░  VALUE unit`.
+/// Generalises the ad-hoc RF bars so every page draws gauges the same way.
+pub fn hbar_row(
+    label: &str,
+    value: f64,
+    min_val: f64,
+    max_val: f64,
+    unit: &str,
+    bar_w: usize,
+) -> String {
+    let g = bar(value, min_val, max_val, bar_w);
+    // Drop the surrounding brackets from `bar()` for a cleaner tile look.
+    let g = g.trim_start_matches('[').trim_end_matches(']');
+    format!("{label:<8} {g}  {value:>5.0} {unit}")
+}
+
+/// A single KPI scorecard card body: a big value line + a trend sparkline line.
+/// `trend` is "↑" / "↓" / "=" describing the recent direction.
+pub fn kpi_tile(value: &str, unit: &str, history: &[f64], floor: f64, width: usize) -> Vec<String> {
+    let spark_w = width.saturating_sub(3).max(6);
+    let spark = sparkline(history, spark_w, floor);
+    let trend = kpi_trend(history);
+    vec![format!("  {value} {unit}"), format!("  {spark} {trend}")]
+}
+
+/// Direction arrow for the tail of a KPI history.
+fn kpi_trend(history: &[f64]) -> &'static str {
+    if history.len() < 4 {
+        return "=";
+    }
+    let n = history.len();
+    let recent: f64 = history[n - 3..].iter().sum::<f64>() / 3.0;
+    let prior: f64 = history[n.saturating_sub(6)..n - 3].iter().sum::<f64>()
+        / (3.0_f64).min((n - 3) as f64).max(1.0);
+    let delta = recent - prior;
+    let scale = prior.abs().max(1.0);
+    if delta > scale * 0.08 {
+        "↑"
+    } else if delta < -scale * 0.08 {
+        "↓"
+    } else {
+        "="
+    }
+}
+
 /// A compact horizontal "dial": a bracketed arc that fills with the score plus
 /// the number and rating. One line, fits the dense Overview panel.
 pub fn health_dial_line(score: i64) -> (String, String) {
@@ -375,5 +451,52 @@ mod tests {
     fn vertical_graph_has_requested_rows() {
         let g = render_2d_vertical_graph(&[1.0, 2.0, 3.0], 4, 40, 0.0, 10.0, "m");
         assert_eq!(g.len(), 4);
+    }
+
+    #[test]
+    fn arc_gauge_returns_requested_rows_and_clamps() {
+        assert_eq!(arc_gauge(65, 3).len(), 3);
+        // rows clamp to [2,5]
+        assert_eq!(arc_gauge(65, 99).len(), 5);
+        assert_eq!(arc_gauge(65, 0).len(), 2);
+        // 0 and 100 are both drawable without panic.
+        let _ = arc_gauge(0, 4);
+        let full = arc_gauge(100, 4);
+        // At 100% every band should be fully lit (no unlit '·').
+        assert!(full.iter().all(|l| !l.contains('·')));
+    }
+
+    #[test]
+    fn hbar_row_has_label_and_value() {
+        let r = hbar_row("Signal", -64.0, -90.0, -40.0, "dBm", 12);
+        assert!(r.contains("Signal"));
+        assert!(r.contains("dBm"));
+        // No stray brackets from bar().
+        assert!(!r.contains('['));
+    }
+
+    #[test]
+    fn kpi_tile_has_value_and_spark_lines() {
+        let t = kpi_tile(
+            "89.6",
+            "ms",
+            &[80.0, 82.0, 90.0, 88.0, 91.0, 95.0],
+            10.0,
+            18,
+        );
+        assert_eq!(t.len(), 2);
+        assert!(t[0].contains("89.6"));
+        assert!(t[0].contains("ms"));
+    }
+
+    #[test]
+    fn kpi_trend_detects_direction() {
+        let up = [10.0, 10.0, 10.0, 30.0, 30.0, 30.0];
+        let down = [30.0, 30.0, 30.0, 10.0, 10.0, 10.0];
+        let flat = [20.0, 20.0, 20.0, 20.0, 20.0, 20.0];
+        assert_eq!(kpi_trend(&up), "↑");
+        assert_eq!(kpi_trend(&down), "↓");
+        assert_eq!(kpi_trend(&flat), "=");
+        assert_eq!(kpi_trend(&[1.0]), "=");
     }
 }

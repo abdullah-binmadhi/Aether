@@ -10,15 +10,86 @@ use ratatui::Frame;
 use crate::core::preset_engine::preset_definitions;
 use crate::render::{RenderState, TuneKind};
 use crate::ui::theme::{alert, amber, amber_bold, dim, good, invert};
-use crate::ui::titled_block;
+use crate::ui::{draw_kpi_strip, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
-    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(6)]).split(area);
-    render_preset_radio(f, rs, rows[0]);
+    let rows = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Length(3),
+        Constraint::Min(6),
+    ])
+    .split(area);
+    draw_kpi(f, rs, rows[0]);
+    render_preset_radio(f, rs, rows[1]);
     let cols =
-        Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(rows[1]);
+        Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(rows[2]);
     render_tune_list(f, rs, cols[0]);
     render_detail(f, rs, cols[1]);
+}
+
+fn draw_kpi(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let defs = preset_definitions();
+    let preset_name = defs
+        .iter()
+        .find(|p| p.id == rs.preset_effective_id)
+        .map(|p| p.short.split_once(':').map(|(_, b)| b).unwrap_or(p.short))
+        .unwrap_or("Auto")
+        .chars()
+        .take(10)
+        .collect::<String>();
+    let zero_lag = !rs.telemetry.awdl_active;
+    let empty: Vec<f64> = Vec::new();
+    let cards = [
+        Kpi {
+            title: "PRESET",
+            value: preset_name,
+            unit: "",
+            history: &empty,
+            floor: 0.0,
+            accent: None,
+        },
+        Kpi {
+            title: "ROOT AUTH",
+            value: if rs.root_authorized {
+                "YES".into()
+            } else {
+                "NO".into()
+            },
+            unit: "",
+            history: &empty,
+            floor: 0.0,
+            accent: if rs.root_authorized {
+                Some(good())
+            } else {
+                None
+            },
+        },
+        Kpi {
+            title: "ZERO-LAG",
+            value: if zero_lag { "ON".into() } else { "OFF".into() },
+            unit: "",
+            history: &empty,
+            floor: 0.0,
+            accent: if zero_lag { Some(good()) } else { None },
+        },
+        Kpi {
+            title: "DNS",
+            value: if rs.wan_snap.ecs_dns_optimal {
+                "OPTIMAL".into()
+            } else {
+                "CHECK".into()
+            },
+            unit: "",
+            history: &empty,
+            floor: 0.0,
+            accent: if rs.wan_snap.ecs_dns_optimal {
+                Some(good())
+            } else {
+                Some(alert())
+            },
+        },
+    ];
+    draw_kpi_strip(f, area, &cards);
 }
 
 fn render_preset_radio(f: &mut Frame, rs: &RenderState, area: Rect) {

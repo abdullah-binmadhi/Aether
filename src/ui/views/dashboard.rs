@@ -1,4 +1,7 @@
-//! Tab [1] Cockpit: THE PIPE (RF telemetry) + THE FLOW (4-hop bufferbloat matrix).
+//! Tab [1] OVERVIEW — BI-dashboard layout:
+//!   KPI scorecard strip  (Health · Ping · Signal · Link rate)
+//!   2x2 tile grid        (RF gauges · Latency oscilloscope · 4-hop bars · Advice)
+//! Fills the whole body — no empty lower half, nothing truncates mid-word.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -6,285 +9,286 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::render::RenderState;
-use crate::ui::theme::{alert, amber, amber_bold, bar, good, invert, sparkline};
-use crate::ui::titled_block;
-use crate::ui::widgets::DECK_MODES;
+use crate::ui::theme::{alert, amber, amber_bold, good, score_color};
+use crate::ui::widgets::{hbar_row, render_2d_vertical_graph};
+use crate::ui::{draw_kpi_strip, grid, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
-    let rows = Layout::vertical([Constraint::Min(8), Constraint::Length(9)]).split(area);
-    let cols =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
-    render_pipe(f, rs, cols[0]);
-    render_flow(f, rs, cols[1]);
-    let bot =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
-    render_analysis(f, rs, bot[0]);
-    render_visual_deck(f, rs, bot[1]);
+    // KPI strip (4 rows tall) on top, tile grid fills the rest.
+    let rows = Layout::vertical([Constraint::Length(4), Constraint::Min(6)]).split(area);
+    draw_kpi(f, rs, rows[0]);
+
+    let tiles = grid(rows[1], 2, 2);
+    render_rf_gauges(f, rs, tiles[0]);
+    render_oscilloscope(f, rs, tiles[1]);
+    render_hop_bars(f, rs, tiles[2]);
+    render_advice(f, rs, tiles[3]);
 }
 
-fn render_visual_deck(f: &mut Frame, rs: &RenderState, area: Rect) {
-    let block = titled_block("VISUAL TELEMETRY DECK ([M] or [ / ] Switch View)");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.height < 2 {
-        return;
-    }
-    let active = ((rs.visual_mode.wrapping_sub(1)) % 4) + 1;
-    let mut pills = Vec::new();
-    for (id, label) in DECK_MODES {
-        let style = if id == active { invert() } else { amber_bold() };
-        pills.push(Span::styled(format!(" [{label}] "), style));
-    }
-    let mut lines = vec![Line::from(pills)];
-    for (idx, l) in rs.deck_lines.iter().enumerate() {
-        let style = if l.contains("[!]") || l.contains("╌✕") {
-            alert()
-        } else if idx == 0
-            || l.contains("INTERPRETATION:")
-            || l.contains("ANALYSIS:")
-            || l.contains("[OK]")
-            || l.contains("══▶")
-        {
-            if l.contains("[OK]") || l.contains("══▶") {
-                good()
-            } else {
-                amber_bold()
-            }
-        } else {
-            amber()
-        };
-        lines.push(Line::from(Span::styled(l.clone(), style)));
-    }
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_analysis(f: &mut Frame, rs: &RenderState, area: Rect) {
-    let analysis = &rs.cockpit_analysis;
-    let block = titled_block("HEALTH & WHAT TO DO NOW");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let score = rs.telemetry.health_score;
-    let (dial, label) = crate::ui::widgets::health_dial_line(score);
-    let score_style = if score >= 72 {
-        good()
-    } else if score >= 50 {
-        amber_bold()
-    } else {
-        alert()
-    };
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(dial, score_style),
-            Span::styled(format!("  {label}"), score_style),
-        ]),
-        Line::from(Span::styled(analysis.recommended_action.clone(), good())),
-    ];
-    // One or two supporting analysis lines (kept short so the dial stays lead).
-    for l in analysis.analysis_lines.iter().take(2) {
-        let style = if l.contains("[!]") { alert() } else { amber() };
-        lines.push(Line::from(Span::styled(l.clone(), style)));
-    }
-    let mut badges = Vec::new();
-    for (name, _verdict, ok) in &analysis.workloads {
-        let short: String = name.split_whitespace().next().unwrap_or(name).to_string();
-        badges.push(Span::styled(
-            format!(" {}{} ", if *ok { "✓" } else { "✗" }, short),
-            if *ok { good() } else { alert() },
-        ));
-    }
-    lines.push(Line::from(badges));
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_pipe(f: &mut Frame, rs: &RenderState, area: Rect) {
+fn draw_kpi(f: &mut Frame, rs: &RenderState, area: Rect) {
     let tel = &rs.telemetry;
-    let block = titled_block("THE PIPE (RF & AIRTIME TELEMETRY)");
+    let health_accent = score_color(tel.health_score);
+    let sig_hist = &rs.socket_sample.signal_history;
+    let rate_hist: Vec<f64> = vec![tel.tx_rate_mbps as f64]; // link rate is mostly stable
+    let cards = [
+        Kpi {
+            title: "HEALTH",
+            value: format!("{}/100", tel.health_score),
+            unit: tel.health_rating.label(),
+            history: &rs.scope_rtt_history, // visual trend proxy
+            floor: 0.0,
+            accent: Some(health_accent),
+        },
+        Kpi {
+            title: "PING",
+            value: format!("{:.1}", rs.scope_avg_ms),
+            unit: "ms",
+            history: &rs.scope_rtt_history,
+            floor: 0.0,
+            accent: None,
+        },
+        Kpi {
+            title: "SIGNAL",
+            value: format!("{}", tel.signal_dbm),
+            unit: "dBm",
+            history: sig_hist,
+            floor: -95.0,
+            accent: None,
+        },
+        Kpi {
+            title: "LINK RATE",
+            value: format!("{}", tel.tx_rate_mbps),
+            unit: "Mbps",
+            history: &rate_hist,
+            floor: 0.0,
+            accent: None,
+        },
+    ];
+    draw_kpi_strip(f, area, &cards);
+}
+
+/// Tile 1: RF quality as a stack of labelled horizontal gauges.
+fn render_rf_gauges(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let tel = &rs.telemetry;
+    let block = titled_block("RF QUALITY");
     let inner = block.inner(area);
     f.render_widget(block, area);
+    let bw = (inner.width as usize).saturating_sub(24).clamp(8, 24);
 
-    let band_badge = if tel.is_hotspot {
-        Span::styled(format!("[HOTSPOT {}]", tel.band.label()), amber_bold())
-    } else if tel.band.is_fast() {
-        Span::styled(format!("[{} LOCK]", tel.band.label()), good())
-    } else {
-        Span::styled(format!("[{} SLOW]", tel.band.label()), alert())
-    };
-
-    let bw = 14usize;
-    let mut lines = vec![Line::from(vec![
-        Span::styled(format!("SSID      : {}", tel.ssid), amber_bold()),
-        Span::raw("  "),
-        band_badge,
-    ])];
-    if !tel.ssid_available {
+    let gauges = [
+        ("Signal", tel.signal_dbm as f64, -90.0, -40.0, "dBm"),
+        ("SNR", tel.snr_db as f64, 5.0, 45.0, "dB"),
+        ("MCS", tel.mcs_index as f64, 0.0, 11.0, "/11"),
+        ("Airtime", tel.airtime_load_pct as f64, 0.0, 100.0, "%"),
+        ("Retry", tel.tx_retry_pct, 0.0, 20.0, "%"),
+    ];
+    let mut lines = Vec::new();
+    for (label, v, lo, hi, unit) in gauges {
+        // Colour: Signal/SNR/MCS good when high; Airtime/Retry good when low.
+        let ratio = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let healthy_high = !matches!(label, "Airtime" | "Retry");
+        let good_val = if healthy_high {
+            ratio >= 0.5
+        } else {
+            ratio <= 0.4
+        };
+        let style = if good_val { good() } else { amber() };
         lines.push(Line::from(Span::styled(
-            "            (name hidden — grant Location permission to reveal)",
-            amber(),
+            hbar_row(label, v, lo, hi, unit, bw),
+            style,
         )));
     }
-    lines.extend([
-        Line::from(Span::styled(
-            format!(
-                "IP -> GW  : {} -> {} ({})",
-                tel.ipv4, tel.gateway, tel.phy_mode
-            ),
-            amber(),
-        )),
-        Line::from(Span::styled(
-            format!("Channel   : {}", tel.channel_label),
-            amber(),
-        )),
-        Line::from(Span::styled(
-            format!("Security  : {}", tel.security),
-            amber(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "Signal    : {} {:>4} dBm",
-                bar(tel.signal_dbm as f64, -90.0, -40.0, bw),
-                tel.signal_dbm
-            ),
-            amber(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "SNR Margin: {} {:>4} dB",
-                bar(tel.snr_db as f64, 5.0, 45.0, bw),
-                tel.snr_db
-            ),
-            amber(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "Link Rate : {} {:>4} Mbps",
-                bar(tel.tx_rate_mbps as f64, 0.0, 866.0, bw),
-                tel.tx_rate_mbps
-            ),
-            amber_bold(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "MCS Index : {} {:>4} / 11",
-                bar(tel.mcs_index as f64, 0.0, 11.0, bw),
-                tel.mcs_index
-            ),
-            amber(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "AWDL/DNS  : {} │ DNS {} │ MTU {}",
-                if tel.awdl_active {
-                    "○ STD"
-                } else {
-                    "● ZERO-LAG"
-                },
-                tel.dns_servers
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "Auto".into()),
-                tel.mtu
-            ),
-            if tel.awdl_active { amber() } else { good() },
-        )),
-    ]);
-
-    if !tel.alerts.is_empty() {
-        lines.push(Line::from(Span::styled("─ ALERTS ─", amber())));
-        for a in tel.alerts.iter().take(3) {
-            lines.push(Line::from(Span::styled(format!("[!] {a}"), alert())));
-        }
-    }
-
+    lines.push(Line::from(Span::styled(
+        format!(
+            "DNS {} · MTU {} · {}",
+            tel.dns_servers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Auto".into()),
+            tel.mtu,
+            if tel.awdl_active {
+                "AWDL STD"
+            } else {
+                "ZERO-LAG"
+            }
+        ),
+        if tel.awdl_active { amber() } else { good() },
+    )));
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_flow(f: &mut Frame, rs: &RenderState, area: Rect) {
-    let block = titled_block("THE FLOW (OSCILLOSCOPE & 4-HOP ISOLATION MATRIX)");
+/// Tile 2: tall latency oscilloscope (RTT vertical block graph + down/up sparks).
+fn render_oscilloscope(f: &mut Frame, rs: &RenderState, area: Rect) {
+    use crate::ui::theme::sparkline;
+    let block = titled_block("LATENCY OSCILLOSCOPE");
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if inner.height < 3 {
+        return;
+    }
+    let w = inner.width as usize;
+    // Reserve 3 lines for the header + down/up sparks; rest is the RTT graph.
+    let graph_h = (inner.height as usize).saturating_sub(3).max(2);
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "PING {:.1}ms · Jit {:.1}ms · Loss {:.1}%",
+            rs.scope_avg_ms, rs.scope_jitter_ms, rs.scope_loss_pct
+        ),
+        amber_bold(),
+    ))];
+    for g in render_2d_vertical_graph(&rs.scope_rtt_history, graph_h, w, 0.0, 50.0, "m") {
+        lines.push(Line::from(Span::styled(g, amber())));
+    }
+    let sw = w.saturating_sub(14).max(8);
+    lines.push(Line::from(Span::styled(
+        format!(
+            "DOWN {} {:.0}K",
+            sparkline(&rs.scope_down_history, sw, 1.0),
+            rs.scope_down_kbs
+        ),
+        good(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "UP   {} {:.0}K",
+            sparkline(&rs.scope_up_history, sw, 1.0),
+            rs.scope_up_kbs
+        ),
+        amber(),
+    )));
+    f.render_widget(Paragraph::new(lines), inner);
+}
 
-    let spark_w = (inner.width as usize).saturating_sub(18).max(10);
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!(
-                "PING {:4.1}ms  Jit {:3.1}ms  Loss {:3.1}% │ ▼{:6.1} ▲{:5.1} KB/s",
-                rs.scope_avg_ms,
-                rs.scope_jitter_ms,
-                rs.scope_loss_pct,
-                rs.scope_down_kbs,
-                rs.scope_up_kbs
-            ),
-            amber_bold(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "RTT {} {:.1}ms",
-                sparkline(&rs.scope_rtt_history, spark_w, 10.0),
-                rs.scope_avg_ms
-            ),
-            amber_bold(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "T/P {} {:.0}K",
-                sparkline(&rs.scope_down_history, spark_w, 1.0),
-                rs.scope_down_kbs
-            ),
-            amber(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "UP  {} {:.0}K",
-                sparkline(&rs.scope_up_history, spark_w, 1.0),
-                rs.scope_up_kbs
-            ),
-            amber(),
-        )),
-        Line::from(Span::raw("")),
-        Line::from(Span::styled(
-            format!(
-                "{:<4} {:<12} {:>7} {:>7} {:>7}  STATUS  (max bloat +{:.0}ms{})",
-                "HOP",
-                "NODE",
-                "RTT",
-                "JIT",
-                "BLOAT",
-                rs.scope_max_bloat,
-                if rs.cam_pacer_active { ", CAM on" } else { "" }
-            ),
-            amber_bold(),
-        )),
-    ];
+/// Tile 3: one bar per hop, length ∝ RTT, colour = status.
+fn render_hop_bars(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let block = titled_block("4-HOP PATH");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let w = inner.width as usize;
+    let bar_max = (w.saturating_sub(28)).clamp(6, 40);
 
+    // Scale bars to the slowest hop so the longest is full-width.
+    let max_rtt = rs
+        .scope_hops
+        .iter()
+        .map(|h| h.rtt_ms)
+        .fold(1.0_f64, f64::max);
+
+    let mut lines = Vec::new();
     for h in &rs.scope_hops {
+        let filled = ((h.rtt_ms / max_rtt) * bar_max as f64).round() as usize;
+        let filled = filled.min(bar_max);
+        let g = format!("{}{}", "█".repeat(filled), "░".repeat(bar_max - filled));
         let style = if h.status.starts_with("[!]") {
             alert()
-        } else if h.status.starts_with("[OK]") {
-            good()
         } else {
-            amber()
+            good()
         };
         lines.push(Line::from(Span::styled(
             format!(
-                "[{}] {:<12} {:>5.1}ms {:>5.1}ms +{:>4.0}ms  {}",
-                h.hop, h.label, h.rtt_ms, h.jitter_ms, h.bloat_delta_ms, h.status
+                "[{}] {:<9} {} {:>6.1}ms",
+                h.hop,
+                h.label.chars().take(9).collect::<String>(),
+                g,
+                h.rtt_ms
             ),
             style,
         )));
     }
-
     lines.push(Line::from(Span::raw("")));
-    let verdict_style = if rs.scope_fault.starts_with("[OK]") {
+    let vstyle = if rs.scope_fault.starts_with("[OK]") {
         good()
     } else {
         alert()
     };
     lines.push(Line::from(Span::styled(
         format!("VERDICT: {}", rs.scope_fault),
-        verdict_style,
+        vstyle,
     )));
-
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Tile 4: arc gauge + WHAT TO DO NOW (word-wrapped) + workload readiness badges.
+fn render_advice(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let analysis = &rs.cockpit_analysis;
+    let score = rs.telemetry.health_score;
+    let block = titled_block("WHAT TO DO NOW");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let style = score_color(score);
+    let w = inner.width as usize;
+
+    let mut lines = Vec::new();
+    // Compact arc gauge header (2 rows) when there's vertical room.
+    if inner.height >= 6 {
+        for (i, g) in crate::ui::widgets::arc_gauge(score, 2)
+            .into_iter()
+            .enumerate()
+        {
+            let suffix = if i == 0 {
+                format!("   {score}/100")
+            } else {
+                format!("   {}", rs.telemetry.health_rating.label())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(g, style),
+                Span::styled(suffix, style),
+            ]));
+        }
+    } else {
+        let (dial, label) = crate::ui::widgets::health_dial_line(score);
+        lines.push(Line::from(Span::styled(format!("{dial}  {label}"), style)));
+    }
+
+    // Recommended action, word-wrapped so nothing truncates.
+    for l in wrap_text(&analysis.recommended_action, w) {
+        lines.push(Line::from(Span::styled(l, good())));
+    }
+    // One supporting analysis line.
+    if let Some(l) = analysis.analysis_lines.first() {
+        let st = if l.contains("[!]") { alert() } else { amber() };
+        for wl in wrap_text(l, w) {
+            lines.push(Line::from(Span::styled(wl, st)));
+        }
+    }
+
+    // Workload readiness badges.
+    let mut badges = Vec::new();
+    for (name, _v, ok) in &analysis.workloads {
+        let short: String = name.split_whitespace().next().unwrap_or(name).to_string();
+        badges.push(Span::styled(
+            format!(" {}{} ", if *ok { "✓" } else { "✗" }, short),
+            if *ok { good() } else { alert() },
+        ));
+    }
+    if !badges.is_empty() {
+        lines.push(Line::from(badges));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Minimal greedy word-wrap for a single paragraph.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(12);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let cand = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
+        if cand.chars().count() <= width {
+            cur = cand;
+        } else {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur = word.to_string();
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }

@@ -286,3 +286,69 @@ pub fn titled_block(title: &str) -> Block<'_> {
         .border_style(amber())
         .title(Span::styled(format!(" {title} "), amber_bold()))
 }
+
+/// One KPI scorecard card: a titled bordered tile with a big value line and a
+/// trend sparkline line underneath (BI-dashboard style).
+pub struct Kpi<'a> {
+    pub title: &'a str,
+    pub value: String,
+    pub unit: &'a str,
+    pub history: &'a [f64],
+    pub floor: f64,
+    /// Colour accent for the value (e.g. graded by score). None = amber_bold.
+    pub accent: Option<ratatui::style::Style>,
+}
+
+/// Draw the KPI scorecard strip: `cards.len()` equal-width tiles across `area`.
+/// Shared chrome on every page, so the thin header imbalance is gone.
+pub fn draw_kpi_strip(f: &mut Frame, area: Rect, cards: &[Kpi]) {
+    if cards.is_empty() {
+        return;
+    }
+    let constraints: Vec<Constraint> = cards
+        .iter()
+        .map(|_| Constraint::Ratio(1, cards.len() as u32))
+        .collect();
+    let cols = Layout::horizontal(constraints).split(area);
+    for (i, card) in cards.iter().enumerate() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(dim())
+            .title(Span::styled(format!(" {} ", card.title), dim()));
+        let inner = block.inner(cols[i]);
+        f.render_widget(block, cols[i]);
+        let accent = card.accent.unwrap_or_else(amber_bold);
+        let body = widgets::kpi_tile(
+            &card.value,
+            card.unit,
+            card.history,
+            card.floor,
+            inner.width as usize,
+        );
+        let mut lines = Vec::new();
+        for (j, l) in body.iter().enumerate() {
+            let style = if j == 0 { accent } else { amber() };
+            lines.push(Line::from(Span::styled(l.clone(), style)));
+        }
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+/// Split an area into a `cols` x `rows` grid of equal tiles, row-major.
+pub fn grid(area: Rect, cols: usize, rows: usize) -> Vec<Rect> {
+    let row_c: Vec<Constraint> = (0..rows)
+        .map(|_| Constraint::Ratio(1, rows as u32))
+        .collect();
+    let row_areas = Layout::vertical(row_c).split(area);
+    let mut out = Vec::with_capacity(cols * rows);
+    for ra in row_areas.iter() {
+        let col_c: Vec<Constraint> = (0..cols)
+            .map(|_| Constraint::Ratio(1, cols as u32))
+            .collect();
+        let cas = Layout::horizontal(col_c).split(*ra);
+        for ca in cas.iter() {
+            out.push(*ca);
+        }
+    }
+    out
+}
