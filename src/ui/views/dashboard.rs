@@ -60,21 +60,32 @@ fn render_visual_deck(f: &mut Frame, rs: &RenderState, area: Rect) {
 
 fn render_analysis(f: &mut Frame, rs: &RenderState, area: Rect) {
     let analysis = &rs.cockpit_analysis;
-    let block = titled_block("LIVE RF & WORKLOAD INTERPRETATION");
+    let block = titled_block("HEALTH & WHAT TO DO NOW");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let mut lines: Vec<Line> = analysis
-        .analysis_lines
-        .iter()
-        .map(|l| {
-            let style = if l.contains("[!]") { alert() } else { amber() };
-            Line::from(Span::styled(l.clone(), style))
-        })
-        .collect();
-    lines.push(Line::from(Span::styled(
-        analysis.recommended_action.clone(),
-        good(),
-    )));
+
+    let score = rs.telemetry.health_score;
+    let (dial, label) = crate::ui::widgets::health_dial_line(score);
+    let score_style = if score >= 72 {
+        good()
+    } else if score >= 50 {
+        amber_bold()
+    } else {
+        alert()
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(dial, score_style),
+            Span::styled(format!("  {label}"), score_style),
+        ]),
+        Line::from(Span::styled(analysis.recommended_action.clone(), good())),
+    ];
+    // One or two supporting analysis lines (kept short so the dial stays lead).
+    for l in analysis.analysis_lines.iter().take(2) {
+        let style = if l.contains("[!]") { alert() } else { amber() };
+        lines.push(Line::from(Span::styled(l.clone(), style)));
+    }
     let mut badges = Vec::new();
     for (name, _verdict, ok) in &analysis.workloads {
         let short: String = name.split_whitespace().next().unwrap_or(name).to_string();

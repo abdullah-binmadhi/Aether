@@ -78,6 +78,13 @@ pub struct RenderState {
     pub pw_edit_active: bool,
     pub pw_edit_ssid: String,
     pub pw_edit_buf: String,
+
+    // Action palette overlay.
+    pub palette_active: bool,
+    pub palette_filter: String,
+    pub palette_cursor: usize,
+    /// (name, description) of the currently matching commands, in order.
+    pub palette_items: Vec<(String, String)>,
 }
 
 #[derive(Clone)]

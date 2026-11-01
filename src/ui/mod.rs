@@ -59,6 +59,83 @@ pub fn draw(f: &mut Frame, rs: &RenderState, spin: usize) {
         Tab::SpeedTest => views::speedtest::render(f, rs, right[1]),
     }
     draw_context_footer(f, rs, right[2], spin);
+
+    if rs.palette_active {
+        draw_palette(f, rs, area);
+    }
+}
+
+/// Centered command-palette overlay (VS-Code style): a filter line + the list
+/// of matching actions with descriptions.
+fn draw_palette(f: &mut Frame, rs: &RenderState, area: Rect) {
+    use ratatui::widgets::Clear;
+    let w = area.width.saturating_sub(8).clamp(40, 70);
+    let h = area.height.saturating_sub(6).clamp(8, 18);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(amber_bold())
+        .title(Span::styled(" ACTION PALETTE ", invert()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(2),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    // Filter line.
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  filter: ", dim()),
+            Span::styled(format!("{}▏", rs.palette_filter), amber_bold()),
+        ])),
+        rows[0],
+    );
+
+    // Matching items.
+    let visible = rows[1].height as usize;
+    let start = rs.palette_cursor.saturating_sub(visible.saturating_sub(1));
+    let mut lines = Vec::new();
+    for (i, (name, desc)) in rs
+        .palette_items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+    {
+        let selected = i == rs.palette_cursor;
+        let ptr = if selected { "▸ " } else { "  " };
+        let name_style = if selected { invert() } else { amber_bold() };
+        lines.push(Line::from(vec![
+            Span::styled(ptr, amber_bold()),
+            Span::styled(format!("{name:<26}"), name_style),
+            Span::styled(format!(" {desc}"), dim()),
+        ]));
+    }
+    if rs.palette_items.is_empty() {
+        lines.push(Line::from(Span::styled("  (no matching action)", dim())));
+    }
+    f.render_widget(Paragraph::new(lines), rows[1]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " ↑↓ move   Enter run   Esc close ",
+            invert(),
+        ))),
+        rows[2],
+    );
 }
 
 /// Per-page health glyph so a problem shows in the rail without visiting it.

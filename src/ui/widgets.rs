@@ -34,6 +34,21 @@ fn mcs_info(mcs: i64) -> (&'static str, &'static str, i64, usize, usize, i64) {
     }
 }
 
+/// A compact horizontal "dial": a bracketed arc that fills with the score plus
+/// the number and rating. One line, fits the dense Overview panel.
+pub fn health_dial_line(score: i64) -> (String, String) {
+    let filled = ((score as f64 / 100.0) * 20.0).round() as usize;
+    let filled = filled.min(20);
+    let arc = format!("{}{}", "█".repeat(filled), "░".repeat(20 - filled));
+    let label = match score {
+        s if s >= 88 => "OPTIMAL",
+        s if s >= 72 => "GOOD",
+        s if s >= 50 => "DEGRADED",
+        _ => "CRITICAL",
+    };
+    (format!("  {score:>3}/100  [{arc}]"), label.to_string())
+}
+
 /// Multi-row vertical block chart with a left Y-axis margin.
 pub fn render_2d_vertical_graph(
     values: &[f64],

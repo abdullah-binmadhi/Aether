@@ -646,6 +646,9 @@ mod anim_tests {
         h.join().unwrap();
         // We must have observed several distinct intermediate progress values,
         // not just {0, 100} — that's the proof the UI can animate.
-        assert!(seen.len() >= 4, "only saw progress values {seen:?}; animation would be a jump");
+        assert!(
+            seen.len() >= 4,
+            "only saw progress values {seen:?}; animation would be a jump"
+        );
     }
 }

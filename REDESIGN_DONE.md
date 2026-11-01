@@ -64,14 +64,31 @@ TUNE & FIX page body:
       ↑↓ move   Space toggle / run
 
 --------------------------------------------------------------------------------
-STILL TO COME (your call — say the word and I'll build any of these)
+4. GLOBAL ACTION PALETTE — DONE
 --------------------------------------------------------------------------------
-  • The global ACTION PALETTE overlay (press p, fuzzy-filter every action)
-  • A semicircle HEALTH DIAL gauge on the Overview page (the "grandiose" piece)
+Press  p  from anywhere to open a centred overlay listing all 24 commands with
+plain-English names. Type to fuzzy-filter (subsequence match), ↑↓ to pick,
+Enter to run, Esc to close. No more memorising single letters — discover every
+action by name. (Capital  P  now cycles the active preset.)
+
+--------------------------------------------------------------------------------
+5. HEALTH DIAL on OVERVIEW — DONE
+--------------------------------------------------------------------------------
+The Overview analysis panel now leads with a one-line bracketed health ARC that
+fills proportionally to the 0–100 score and is colour-graded (green/amber/red),
+followed by a "WHAT TO DO NOW" line that names the single highest-impact fix.
+(Used a compact 1-line arc rather than a 3-row semicircle so it fits the dense
+panel without pushing the live readouts off-screen.)
+
+--------------------------------------------------------------------------------
+STILL TO COME (your call — say the word and I'll build it)
+--------------------------------------------------------------------------------
   • Splitting Overview into separate CONNECTION / LATENCY pages
+    (DEFERRED — the dashboard already shows THE PIPE and THE FLOW side-by-side,
+     so the split is optional. Say the word if you still want two pages.)
   • Double-line border on the active panel for extra visual hierarchy
 
-Nav rail + header + footer, live speedtest animation, and the toggle-based
-TUNE & FIX page are all LIVE now. Try `wifi-rust`, press 4 for TUNE & FIX, and
-arrow through the toggles.
+Nav rail + header + footer, live speedtest animation, toggle-based TUNE & FIX,
+the global ACTION PALETTE (p), and the OVERVIEW HEALTH DIAL are all LIVE now.
+Try `wifi-rust`: press  p  for the palette, 4 for TUNE & FIX, 1 for the dial.
 ================================================================================

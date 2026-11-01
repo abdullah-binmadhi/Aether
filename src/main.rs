@@ -725,6 +725,21 @@ fn map_key(
 ) -> Option<Action> {
     use Action::*;
 
+    // Action palette overlay captures all keys while open.
+    if rs.palette_active {
+        return Some(match code {
+            KeyCode::Esc => PaletteClose,
+            KeyCode::Enter => PaletteConfirm,
+            KeyCode::Up => PaletteUp,
+            KeyCode::Down => PaletteDown,
+            KeyCode::Backspace => PaletteBackspace,
+            KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => PaletteDown,
+            KeyCode::Char('p') if mods.contains(KeyModifiers::CONTROL) => PaletteUp,
+            KeyCode::Char(c) => PaletteChar(c),
+            _ => return None,
+        });
+    }
+
     // Password editor sub-mode captures most keys.
     if rs.pw_edit_active {
         return Some(match code {
@@ -772,7 +787,8 @@ fn map_key(
         KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::SpeedTest => SpeedApple,
         KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::Processes => LanSweep,
         KeyCode::Char('u') | KeyCode::Char('U') if tab == Tab::Processes => ResumeAll,
-        KeyCode::Char('p') | KeyCode::Char('P') => CyclePreset,
+        KeyCode::Char('p') => PaletteOpen,
+        KeyCode::Char('P') => CyclePreset,
         KeyCode::Char('w') | KeyCode::Char('W') => ToggleWmm,
         KeyCode::Char('x') | KeyCode::Char('X') => ToggleNoDelay,
         KeyCode::Char('o') | KeyCode::Char('O') => Hop2Repair,

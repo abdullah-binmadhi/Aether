@@ -165,6 +165,11 @@ pub struct App {
     pub pw_edit_buf: String,
     pub pw_edit_idx: usize,
 
+    // Action palette overlay (press `p`).
+    pub palette_active: bool,
+    pub palette_filter: String,
+    pub palette_cursor: usize,
+
     last_seen_ssid: String,
     last_seen_gw: String,
     pub stop_flag: Arc<AtomicBool>,
@@ -241,6 +246,9 @@ impl App {
             pw_edit_ssid: String::new(),
             pw_edit_buf: String::new(),
             pw_edit_idx: 0,
+            palette_active: false,
+            palette_filter: String::new(),
+            palette_cursor: 0,
             last_seen_ssid: String::new(),
             last_seen_gw: String::new(),
             stop_flag,
@@ -626,6 +634,16 @@ impl App {
             pw_edit_active: self.pw_edit_active,
             pw_edit_ssid: self.pw_edit_ssid.clone(),
             pw_edit_buf: self.pw_edit_buf.clone(),
+            palette_active: self.palette_active,
+            palette_filter: self.palette_filter.clone(),
+            palette_cursor: self.palette_cursor,
+            palette_items: {
+                let cat = palette_catalog();
+                palette_matches(&self.palette_filter)
+                    .into_iter()
+                    .map(|i| (cat[i].0.to_string(), cat[i].1.to_string()))
+                    .collect()
+            },
         }
     }
 
@@ -855,6 +873,42 @@ impl App {
                 );
                 self.status_msg = msg;
             }
+            // Action palette.
+            PaletteOpen => {
+                self.palette_active = true;
+                self.palette_filter.clear();
+                self.palette_cursor = 0;
+            }
+            PaletteClose => self.palette_active = false,
+            PaletteChar(c) => {
+                self.palette_filter.push(c);
+                self.palette_cursor = 0;
+            }
+            PaletteBackspace => {
+                self.palette_filter.pop();
+                self.palette_cursor = 0;
+            }
+            PaletteUp => {
+                self.palette_cursor = self.palette_cursor.saturating_sub(1);
+            }
+            PaletteDown => {
+                let n = palette_matches(&self.palette_filter).len();
+                if n > 0 {
+                    self.palette_cursor = (self.palette_cursor + 1).min(n - 1);
+                }
+            }
+            PaletteConfirm => {
+                let matches = palette_matches(&self.palette_filter);
+                if let Some(&cat_idx) = matches.get(self.palette_cursor) {
+                    self.palette_active = false;
+                    if let Some(a) = palette_action(cat_idx) {
+                        self.apply_action(a);
+                    }
+                }
+            }
+            PaletteToggleBuffers => {
+                self.status_msg = self.kernel.toggle_8mb_streaming_buffers(None);
+            }
             // Password editor.
             PwOpen => {
                 let mut curr = self.telemetry.ssid.clone();
@@ -1018,6 +1072,149 @@ impl App {
     }
 }
 
+/// Every command exposed in the action palette: (name, description).
+/// The index into this list maps to an `Action` via `palette_action()`.
+pub fn palette_catalog() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "WAN & YouTube Doctor",
+            "Diagnose & heal DNS, MTU, IPv6, gateway (8 stages)",
+        ),
+        ("God-Mode Boost", "Apply every optimization at once"),
+        (
+            "Toggle Zero-Lag Mode",
+            "Silence AWDL/AirDrop + pause sync daemons",
+        ),
+        (
+            "Toggle WMM VIP Priority",
+            "802.11e voice/video airtime priority",
+        ),
+        ("Toggle CAM Pacer", "25Hz anti-sleep radio heartbeat"),
+        (
+            "Toggle Gaming TCP No-Delay",
+            "delayed_ack=0 + fast retransmit",
+        ),
+        (
+            "Toggle 32MB Buffers",
+            "High-BDP TCP window for 4K/large transfers",
+        ),
+        ("Toggle IPv6 Guard", "Force clean IPv4 routing"),
+        ("Toggle QUIC Fast-Path", "Force TCP HTTP/2 over UDP QUIC"),
+        (
+            "Hop-2 Anti-Bloat Repair",
+            "Refresh gateway ARP + fast-ACK + WMM",
+        ),
+        (
+            "Reap Zombie Sockets",
+            "Flush stuck CLOSE_WAIT/FIN sockets + sync",
+        ),
+        (
+            "Fix macOS \"!\" Mark",
+            "Restore DHCP DNS + refresh Wi-Fi agent",
+        ),
+        (
+            "Clamp MTU (1492/1500)",
+            "Toggle fiber/PPPoE fragmentation clamp",
+        ),
+        (
+            "Pre-warm CDN Edges",
+            "Warm YouTube/AI/gaming TLS handshakes",
+        ),
+        (
+            "Verify Private MAC",
+            "Confirm link-safe private Wi-Fi address",
+        ),
+        ("Cycle Preset", "Switch to the next mission profile"),
+        (
+            "Toggle Auto-Pilot",
+            "Let the engine auto-apply the best preset",
+        ),
+        (
+            "Captive / Gateway Probe",
+            "Check captive portal + gateway ports",
+        ),
+        (
+            "Roam & Rescan Airspace",
+            "Smart BSSID roam + spectrum rescan",
+        ),
+        ("Export Diagnostic Ticket", "Write a Markdown ISP report"),
+        (
+            "Full Speed Test",
+            "Multi-stream download/upload + bufferbloat",
+        ),
+        ("Quick 5s Speed Burst", "Fast throughput sample"),
+        ("Apple RPM Benchmark", "networkQuality responsiveness test"),
+        (
+            "Root Authorization",
+            "Install passwordless sudoers for kernel tuning",
+        ),
+    ]
+}
+
+/// Map a palette catalog index to the `Action` it fires.
+pub fn palette_action(idx: usize) -> Option<Action> {
+    use Action::*;
+    Some(match idx {
+        0 => Doctor,
+        1 => Boost,
+        2 => ZeroLag,
+        3 => ToggleWmm,
+        4 => CamPacer,
+        5 => ToggleNoDelay,
+        6 => PaletteToggleBuffers,
+        7 => Ipv6Guard,
+        8 => QuicFastpath,
+        9 => Hop2Repair,
+        10 => ZombieSync,
+        11 => FixExclamation,
+        12 => MtuClamp,
+        13 => Prewarm,
+        14 => MacPrivacy,
+        15 => CyclePreset,
+        16 => AutoPilot,
+        17 => CaptiveGateway,
+        18 => RoamRescan,
+        19 => ExportTicket,
+        20 => SpeedFull,
+        21 => SpeedQuick,
+        22 => SpeedApple,
+        23 => RootAuth,
+        _ => return None,
+    })
+}
+
+/// Catalog indices that match the current fuzzy filter (case-insensitive
+/// subsequence on the name + description).
+pub fn palette_matches(filter: &str) -> Vec<usize> {
+    let f = filter.to_lowercase();
+    palette_catalog()
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, desc))| {
+            f.is_empty() || subseq(&f, &name.to_lowercase()) || desc.to_lowercase().contains(&f)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// True if `needle` is a subsequence of `hay` (fuzzy match).
+fn subseq(needle: &str, hay: &str) -> bool {
+    let mut h = hay.chars();
+    for nc in needle.chars() {
+        if nc == ' ' {
+            continue;
+        }
+        loop {
+            match h.next() {
+                Some(hc) if hc == nc => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
 fn visual_name(m: u8) -> &'static str {
     match m {
         1 => "1:TOPOLOGY PIPELINE DIAGRAM",
@@ -1075,6 +1272,15 @@ pub enum Action {
     PwTab,
     PwSave,
     PwKeychain,
+    // Action palette overlay.
+    PaletteOpen,
+    PaletteClose,
+    PaletteChar(char),
+    PaletteBackspace,
+    PaletteUp,
+    PaletteDown,
+    PaletteConfirm,
+    PaletteToggleBuffers,
 }
 
 #[cfg(test)]
