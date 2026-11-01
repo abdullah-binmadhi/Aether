@@ -142,15 +142,15 @@ fn render_heatmap(f: &mut Frame, rs: &RenderState, area: Rect) {
         amber_bold(),
     ))];
 
-    for r in &data {
+    for (ri, r) in data.iter().enumerate() {
         let filled = ((r.count as f64 / busiest as f64) * bar_w as f64).round() as usize;
         let filled = filled.min(bar_w);
         // Clear blocks show an empty track (spaces), not a dim ░ bar — a clear
-        // channel should read as clear, not as noise.
+        // channel should read as clear, not as noise. The fill is textured.
         let track = if r.count == 0 { ' ' } else { '░' };
         let gbar = format!(
             "{}{}",
-            "█".repeat(filled),
+            crate::ui::theme::tex_bar(filled, filled, ri),
             track.to_string().repeat(bar_w - filled)
         );
         let (state, style) = if r.colliding {
@@ -207,10 +207,11 @@ fn render_neighbors(f: &mut Frame, rs: &RenderState, area: Rect) {
     let rssi_bar = |dbm: i64| -> String {
         let ratio = ((dbm as f64 + 95.0) / 55.0).clamp(0.0, 1.0);
         let filled = (ratio * bar_w as f64).round() as usize;
+        let filled = filled.min(bar_w);
         format!(
             "{}{}",
-            "█".repeat(filled.min(bar_w)),
-            "░".repeat(bar_w - filled.min(bar_w))
+            crate::ui::theme::tex_bar(filled, filled, dbm.unsigned_abs() as usize),
+            "░".repeat(bar_w - filled)
         )
     };
 
@@ -259,12 +260,12 @@ fn render_neighbors(f: &mut Frame, rs: &RenderState, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-/// ★ Always-on Sweet-Spot Locator panel: big score, meter, live RF gauges,
+/// Always-on Sweet-Spot Locator panel: big score, meter, live RF gauges,
 /// Geiger click-rate and a move-this-way hint from the recent signal trend.
 fn render_sweetspot(f: &mut Frame, rs: &RenderState, area: Rect) {
     let tel = &rs.telemetry;
     let q = crate::core::acoustic_radar::calculate_quality_score(tel);
-    let block = titled_block("★ SWEET-SPOT LOCATOR ([S] audio scan)");
+    let block = titled_block("◆ SWEET-SPOT LOCATOR ([S] audio scan)");
     let inner = block.inner(area);
     f.render_widget(block, area);
     let w = inner.width as usize;
@@ -341,7 +342,11 @@ fn render_rf_scanner(f: &mut Frame, rs: &RenderState, area: Rect) {
     let bar_w = w.saturating_sub(26).clamp(6, 24);
     let conf_bar = move |c: f64| -> String {
         let filled = (c.clamp(0.0, 1.0) * bar_w as f64).round() as usize;
-        format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled))
+        format!(
+            "{}{}",
+            crate::ui::theme::tex_bar(filled, filled, 1),
+            "░".repeat(bar_w - filled)
+        )
     };
 
     let rowf = |name: &str, d: &rf::Detection| -> Line<'static> {

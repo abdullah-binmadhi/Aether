@@ -90,9 +90,8 @@ pub fn hbar_row(
     unit: &str,
     bar_w: usize,
 ) -> String {
-    let g = bar(value, min_val, max_val, bar_w);
-    // Drop the surrounding brackets from `bar()` for a cleaner tile look.
-    let g = g.trim_start_matches('[').trim_end_matches(']');
+    // Textured fill so the gauge isn't a flat solid-amber slab.
+    let g = crate::ui::theme::tex_bar_val(value, min_val, max_val, bar_w, label.len());
     format!("{label:<8} {g}  {value:>5.0} {unit}")
 }
 
@@ -173,6 +172,12 @@ pub fn render_2d_vertical_graph(
         .map(|c| c.to_string())
         .unwrap_or_default();
 
+    // Dither textures for the filled body so a tall graph reads as a textured
+    // area chart instead of a flat solid-amber slab. The top edge of each column
+    // stays a solid block (crisp curve outline); everything beneath it gets a
+    // scanline/stipple pattern that alternates by (row, col) for visual interest.
+    const BODY_TEX: [char; 3] = ['▓', '▒', '░'];
+
     let mut out = Vec::with_capacity(rows_h);
     for r in 0..rows_h {
         let row_top = 1.0 - (r as f64 / rows_h as f64);
@@ -187,13 +192,26 @@ pub fn render_2d_vertical_graph(
             "      │".to_string()
         };
         let mut chars = String::new();
-        for v in &pts {
+        for (c, v) in pts.iter().enumerate() {
             let norm = ((v - lo) / span).clamp(0.0, 1.0);
+            // Which row index (from the top) is this column's peak cell?
+            // top row r where norm >= row_top is the crisp outline cell.
+            let peak_row = ((1.0 - norm) * rows_h as f64).floor() as usize;
             if norm >= row_top {
-                chars.push('█');
+                // At or above the curve top for this row.
+                if r == peak_row {
+                    chars.push('█'); // crisp outline at the very top of the bar
+                } else {
+                    // Interior body: dithered texture, pattern by (row, col).
+                    // A gentle diagonal stipple keeps it lively but readable.
+                    let t = (r + c) % 4;
+                    chars.push(if t == 0 { '▓' } else { BODY_TEX[(r + c) % 3] });
+                }
             } else if norm <= row_bot {
                 chars.push(if r == rows_h - 1 { '·' } else { ' ' });
             } else {
+                // Partial cell at the curve edge — use a fractional block so the
+                // outline stays smooth.
                 let frac = (norm - row_bot) / (row_top - row_bot).max(0.001);
                 let idx = ((frac * BLOCK_SPARK.len() as f64) as usize).min(BLOCK_SPARK.len() - 1);
                 chars.push(BLOCK_SPARK[idx]);

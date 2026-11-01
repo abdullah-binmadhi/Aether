@@ -252,7 +252,7 @@ fn draw_header(f: &mut Frame, rs: &RenderState, area: Rect) {
         let left = Line::from(vec![
             Span::styled(format!(" {page} "), invert()),
             Span::raw("  "),
-            Span::styled(" 🎮 GAME MODE ", good()),
+            Span::styled(" ▌GAME MODE▐ ", good()),
             Span::styled(
                 format!(" {}  ·  {} Mbps", tel.band.label(), tel.tx_rate_mbps),
                 amber(),

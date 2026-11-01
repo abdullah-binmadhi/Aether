@@ -264,10 +264,10 @@ fn render_hop_bars(f: &mut Frame, rs: &RenderState, area: Rect) {
         .fold(1.0_f64, f64::max);
 
     let mut lines = Vec::new();
-    for h in &rs.scope_hops {
+    for (hi, h) in rs.scope_hops.iter().enumerate() {
         let filled = ((h.rtt_ms / max_rtt) * bar_max as f64).round() as usize;
         let filled = filled.min(bar_max);
-        let g = format!("{}{}", "█".repeat(filled), "░".repeat(bar_max - filled));
+        let g = crate::ui::theme::tex_bar(filled, bar_max, hi);
         let style = if h.status.starts_with("[!]") {
             alert()
         } else {

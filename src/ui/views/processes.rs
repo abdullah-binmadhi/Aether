@@ -181,10 +181,14 @@ fn render_top_talkers(f: &mut Frame, rs: &RenderState, area: Rect) {
 
     let cap = (inner.height as usize).max(1);
     let mut lines = Vec::new();
-    for p in procs.iter().take(cap) {
+    for (pi, p) in procs.iter().take(cap).enumerate() {
         let filled = ((p.total_mb / max_mb) * bar_w as f64).round() as usize;
         let filled = filled.min(bar_w);
-        let gbar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
+        let gbar = format!(
+            "{}{}",
+            crate::ui::theme::tex_bar(filled, filled, pi),
+            "░".repeat(bar_w - filled)
+        );
         let style = if p.is_hog {
             alert()
         } else if p.total_mb >= max_mb * 0.5 {
@@ -309,7 +313,11 @@ fn render_connections(f: &mut Frame, rs: &RenderState, area: Rect) {
     let bar = |count: i64| -> String {
         let filled = ((count.max(0) as f64 / total as f64) * bar_w as f64).round() as usize;
         let filled = filled.min(bar_w);
-        format!("{}{}", "█".repeat(filled), " ".repeat(bar_w - filled))
+        format!(
+            "{}{}",
+            crate::ui::theme::tex_bar(filled, filled, filled),
+            " ".repeat(bar_w - filled)
+        )
     };
 
     let mut lines = vec![
@@ -400,10 +408,11 @@ fn render_connections(f: &mut Frame, rs: &RenderState, area: Rect) {
         let mix_w = w.saturating_sub(18).clamp(6, 30);
         let mixbar = |c: i64| -> String {
             let fill = ((c.max(0) as f64 / denom as f64) * mix_w as f64).round() as usize;
+            let fill = fill.min(mix_w);
             format!(
                 "{}{}",
-                "█".repeat(fill.min(mix_w)),
-                " ".repeat(mix_w - fill.min(mix_w))
+                crate::ui::theme::tex_bar(fill, fill, 2),
+                " ".repeat(mix_w - fill)
             )
         };
         lines.push(Line::from(Span::styled(

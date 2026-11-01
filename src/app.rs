@@ -838,7 +838,7 @@ impl App {
         // so nothing wifi-tui does can trip a kernel anti-cheat like Vanguard.
         if self.game_mode.active() && Self::is_risky_in_game(&action, tab) {
             self.status_msg = format!(
-                "🎮 GAME MODE — '{}' blocked (anti-cheat safe). Risky tweaks are disabled while {} runs.",
+                "▶ GAME MODE — '{}' blocked (anti-cheat safe). Risky tweaks are disabled while {} runs.",
                 risky_action_label(&action),
                 self.game_mode.game_name()
             );

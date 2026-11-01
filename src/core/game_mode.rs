@@ -130,7 +130,7 @@ pub fn enter(gm: &mut GameMode, interface: &str, game: String) -> String {
     gm.airdrop_disabled = true;
     flush_dns();
     format!(
-        "🎮 GAME MODE ON — {game} detected. AirDrop/AWDL off, DNS flushed, risky tweaks locked (anti-cheat safe)."
+        "▶ GAME MODE ON — {game} detected. AirDrop/AWDL off, DNS flushed, risky tweaks locked (anti-cheat safe)."
     )
 }
 
@@ -151,7 +151,7 @@ pub fn exit(gm: &mut GameMode, interface: &str) -> String {
     }
     gm.active = false;
     let g = std::mem::take(&mut gm.game_name);
-    format!("🎮 GAME MODE OFF — {g} closed. AirDrop restored, settings back to safe defaults.")
+    format!("▶ GAME MODE OFF — {g} closed. AirDrop restored, settings back to safe defaults.")
 }
 
 /// Force-exit (used on teardown) without needing the interface for MTU restore
