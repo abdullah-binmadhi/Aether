@@ -51,6 +51,8 @@ pub struct RenderState {
 
     // Precomputed preset/analysis outputs (so the UI never calls engine methods).
     pub tuning_controls: Vec<Control>,
+    pub tune_rows: Vec<TuneRow>,
+    pub tune_cursor: usize,
     pub cockpit_analysis: CockpitAnalysis,
     pub preset_effective_id: u8,
     pub preset_selected_id: u8,
@@ -88,4 +90,24 @@ pub struct HopView {
     pub bloat_delta_ms: f64,
     pub loss_pct: f64,
     pub status: String,
+}
+
+/// One selectable row on the TUNE & FIX page.
+#[derive(Clone)]
+pub struct TuneRow {
+    pub kind: TuneKind,
+    pub label: String,
+    pub detail: String,
+    /// For toggles: Some(on/off). For actions: None.
+    pub state: Option<bool>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum TuneKind {
+    /// Section header (not selectable).
+    Header,
+    /// A persistent on/off setting.
+    Toggle,
+    /// A one-shot "RUN" action.
+    Run,
 }

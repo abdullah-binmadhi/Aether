@@ -85,14 +85,19 @@ impl SpeedtestState {
     }
 }
 
-/// A download/upload sampling phase that reads `netdev` byte counters.
+/// Shorthand for the shared, thread-safe speedtest state.
+pub type Shared = std::sync::Arc<std::sync::Mutex<SpeedtestState>>;
+
+/// A download/upload sampling phase that reads `netdev` byte counters. Locks the
+/// shared state only briefly per 140ms tick so the UI's `build_render` can read
+/// the live-updating fields between ticks (this is what animates the bars).
 fn sample_phase(
     duration: Duration,
     is_down: bool,
     base_prog: f64,
     span_prog: f64,
     ping_target: Ipv4Addr,
-    state: &mut SpeedtestState,
+    shared: &Shared,
 ) -> Vec<f64> {
     let (mut prev_rx, mut prev_tx) = read_counters();
     let mut prev_ts = Instant::now();
@@ -102,7 +107,14 @@ fn sample_phase(
     let mut last_ping = Instant::now() - Duration::from_secs(1);
     let mut seq = 0u16;
 
-    while start.elapsed() < duration && state.is_running.load(Ordering::Relaxed) {
+    let running = || {
+        shared
+            .lock()
+            .map(|s| s.is_running.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    };
+
+    while start.elapsed() < duration && running() {
         std::thread::sleep(Duration::from_millis(140));
         let (rx, tx) = read_counters();
         let dt = prev_ts.elapsed().as_secs_f64().max(0.05);
@@ -120,85 +132,120 @@ fn sample_phase(
         prev_tx = tx;
         prev_ts = Instant::now();
 
-        if is_down {
-            state.down_mbps = round1(d_mbps);
-            state.peak_down_mbps = state.peak_down_mbps.max(state.down_mbps);
-            push(&mut state.down_history, state.down_mbps);
-            samples.push(d_mbps);
-        } else {
-            state.up_mbps = round1(u_mbps);
-            state.peak_up_mbps = state.peak_up_mbps.max(state.up_mbps);
-            push(&mut state.up_history, state.up_mbps);
-            samples.push(u_mbps);
-        }
-
+        let mut rtt_sample = None;
         if last_ping.elapsed() >= Duration::from_millis(400) {
             seq = seq.wrapping_add(1);
             if let Some(rtt) = ping::ping_once(ping_target, seq, Duration::from_millis(450)) {
                 let ms = rtt.as_secs_f64() * 1000.0;
                 loaded_rtts.push(ms);
-                push(&mut state.rtt_history, round1(ms));
+                rtt_sample = Some(round1(ms));
             }
             last_ping = Instant::now();
         }
-        state.progress_pct = (base_prog
+
+        let progress = (base_prog
             + (start.elapsed().as_secs_f64() / duration.as_secs_f64()) * span_prog)
             .min(99.0);
+
+        // Short critical section: apply this tick's updates, then release.
+        if let Ok(mut state) = shared.lock() {
+            if is_down {
+                state.down_mbps = round1(d_mbps);
+                state.peak_down_mbps = state.peak_down_mbps.max(state.down_mbps);
+                let v = state.down_mbps;
+                push(&mut state.down_history, v);
+                samples.push(d_mbps);
+            } else {
+                state.up_mbps = round1(u_mbps);
+                state.peak_up_mbps = state.peak_up_mbps.max(state.up_mbps);
+                let v = state.up_mbps;
+                push(&mut state.up_history, v);
+                samples.push(u_mbps);
+            }
+            if let Some(ms) = rtt_sample {
+                push(&mut state.rtt_history, ms);
+            }
+            state.progress_pct = progress;
+        }
     }
 
     if !loaded_rtts.is_empty() {
         let avg = loaded_rtts.iter().sum::<f64>() / loaded_rtts.len() as f64;
-        if is_down {
-            state.loaded_down_rtt_ms = round1(avg);
-        } else {
-            state.loaded_up_rtt_ms = round1(avg);
-        }
-        if loaded_rtts.len() >= 2 {
+        let jitter = if loaded_rtts.len() >= 2 {
             let diffs: Vec<f64> = loaded_rtts
                 .windows(2)
                 .map(|w| (w[1] - w[0]).abs())
                 .collect();
-            state.loaded_jitter_ms = round1(diffs.iter().sum::<f64>() / diffs.len() as f64);
+            Some(round1(diffs.iter().sum::<f64>() / diffs.len() as f64))
+        } else {
+            None
+        };
+        if let Ok(mut state) = shared.lock() {
+            if is_down {
+                state.loaded_down_rtt_ms = round1(avg);
+            } else {
+                state.loaded_up_rtt_ms = round1(avg);
+            }
+            if let Some(j) = jitter {
+                state.loaded_jitter_ms = j;
+            }
         }
     }
     samples
 }
 
-/// Run the full multi-stream suite. Blocks; call on a worker thread.
-pub fn run_full_suite(state: &mut SpeedtestState, ping_target: Ipv4Addr, quick: bool) -> String {
-    if state.is_running.swap(true, Ordering::SeqCst) {
-        return "Speed test is already running.".into();
+/// Run the full multi-stream suite against shared state. Call on a background
+/// thread; the worker keeps publishing snapshots so the UI animates live.
+pub fn run_full_suite(shared: &Shared, ping_target: Ipv4Addr, quick: bool) -> String {
+    {
+        let state = shared.lock().unwrap();
+        if state.is_running.swap(true, Ordering::SeqCst) {
+            return "Speed test is already running.".into();
+        }
     }
-    state.progress_pct = 2.0;
-    state.rpm_score = 0;
-    state.peak_down_mbps = 0.0;
-    state.peak_up_mbps = 0.0;
+    let set = |f: &dyn Fn(&mut SpeedtestState)| {
+        if let Ok(mut s) = shared.lock() {
+            f(&mut s);
+        }
+    };
+    set(&|s| {
+        s.progress_pct = 2.0;
+        s.rpm_score = 0;
+        s.peak_down_mbps = 0.0;
+        s.peak_up_mbps = 0.0;
+        s.phase_name = "PHASE 1/4: Measuring Unloaded Baseline Latency & Jitter...".into();
+    });
 
     let down_dur = if quick { 2.8 } else { 4.5 };
     let up_dur = if quick { 2.0 } else { 3.5 };
 
     // Phase 1: unloaded baseline.
-    state.phase_name = "PHASE 1/4: Measuring Unloaded Baseline Latency & Jitter...".into();
     let mut base_rtts = Vec::new();
     for i in 0..3 {
         if let Some(rtt) = ping::ping_once(ping_target, (i + 1) as u16, Duration::from_millis(500))
         {
             base_rtts.push(rtt.as_secs_f64() * 1000.0);
         }
-        state.progress_pct = 5.0 + (i as f64 + 1.0) * 4.0;
+        let p = 5.0 + (i as f64 + 1.0) * 4.0;
+        set(&|s| s.progress_pct = p);
     }
     if let Some(min) = base_rtts
         .iter()
         .cloned()
         .fold(None, |a: Option<f64>, v| Some(a.map_or(v, |x| x.min(v))))
     {
-        state.unloaded_rtt_ms = round1(min);
-        state.loaded_down_rtt_ms = state.unloaded_rtt_ms;
-        state.loaded_up_rtt_ms = state.unloaded_rtt_ms;
+        let m = round1(min);
+        set(&|s| {
+            s.unloaded_rtt_ms = m;
+            s.loaded_down_rtt_ms = m;
+            s.loaded_up_rtt_ms = m;
+        });
     }
 
     // Phase 2: download saturation.
-    state.phase_name = "PHASE 2/4: Multi-Stream CDN Download Saturation + Loaded Ping...".into();
+    set(&|s| {
+        s.phase_name = "PHASE 2/4: Multi-Stream CDN Download Saturation + Loaded Ping...".into()
+    });
     let dl_urls = [
         "https://speed.cloudflare.com/__down?bytes=35000000",
         "https://speed.cloudflare.com/__down?bytes=35000000",
@@ -223,7 +270,7 @@ pub fn run_full_suite(state: &mut SpeedtestState, ping_target: Ipv4Addr, quick: 
         18.0,
         42.0,
         ping_target,
-        state,
+        shared,
     );
     for mut p in procs {
         let _ = p.kill();
@@ -232,11 +279,14 @@ pub fn run_full_suite(state: &mut SpeedtestState, ping_target: Ipv4Addr, quick: 
         let mut sorted = dl.clone();
         sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
         let top = &sorted[..(sorted.len() / 2).max(1)];
-        state.down_mbps = round1(top.iter().sum::<f64>() / top.len() as f64);
+        let v = round1(top.iter().sum::<f64>() / top.len() as f64);
+        set(&|s| s.down_mbps = v);
     }
 
     // Phase 3: upload saturation.
-    state.phase_name = "PHASE 3/4: Multi-Stream Upload Saturation + Queue Bloat Probe...".into();
+    set(&|s| {
+        s.phase_name = "PHASE 3/4: Multi-Stream Upload Saturation + Queue Bloat Probe...".into()
+    });
     let mu = format!("{}", (up_dur as i64) + 2);
     let mut up_procs: Vec<Child> = Vec::new();
     for _ in 0..3 {
@@ -258,7 +308,7 @@ pub fn run_full_suite(state: &mut SpeedtestState, ping_target: Ipv4Addr, quick: 
         60.0,
         35.0,
         ping_target,
-        state,
+        shared,
     );
     for mut p in up_procs {
         let _ = p.kill();
@@ -267,35 +317,47 @@ pub fn run_full_suite(state: &mut SpeedtestState, ping_target: Ipv4Addr, quick: 
         let mut sorted = ul.clone();
         sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
         let top = &sorted[..(sorted.len() / 2).max(1)];
-        state.up_mbps = round1(top.iter().sum::<f64>() / top.len() as f64);
+        let v = round1(top.iter().sum::<f64>() / top.len() as f64);
+        set(&|s| s.up_mbps = v);
     }
 
-    // Phase 4.
-    state.progress_pct = 100.0;
-    state.compute_grade_and_rpm();
-    state.last_run_ts = clock_str();
-    state.phase_name = format!(
-        "[OK] COMPLETE ({}) — ▼ {} Mbps │ ▲ {} Mbps │ Grade: {}",
-        state.last_run_ts, state.down_mbps, state.up_mbps, state.bufferbloat_grade
-    );
-    let ret = format!(
-        "// SpeedTest Complete: ▼ {} Mbps, ▲ {} Mbps, Grade {}",
-        state.down_mbps, state.up_mbps, state.bufferbloat_grade
-    );
-    state.is_running.store(false, Ordering::SeqCst);
+    // Phase 4: finalize.
+    let ret;
+    {
+        let mut s = shared.lock().unwrap();
+        s.progress_pct = 100.0;
+        s.compute_grade_and_rpm();
+        s.last_run_ts = clock_str();
+        s.phase_name = format!(
+            "[OK] COMPLETE ({}) — ▼ {} Mbps │ ▲ {} Mbps │ Grade: {}",
+            s.last_run_ts, s.down_mbps, s.up_mbps, s.bufferbloat_grade
+        );
+        ret = format!(
+            "// SpeedTest Complete: ▼ {} Mbps, ▲ {} Mbps, Grade {}",
+            s.down_mbps, s.up_mbps, s.bufferbloat_grade
+        );
+        s.is_running.store(false, Ordering::SeqCst);
+    }
     ret
 }
 
-/// Apple's native networkQuality RPM benchmark.
-pub fn run_apple_network_quality(state: &mut SpeedtestState) -> String {
-    if state.is_running.swap(true, Ordering::SeqCst) {
-        return "Speed test is already running.".into();
+/// Apple's native networkQuality RPM benchmark (shared state).
+pub fn run_apple_network_quality(shared: &Shared) -> String {
+    {
+        let state = shared.lock().unwrap();
+        if state.is_running.swap(true, Ordering::SeqCst) {
+            return "Speed test is already running.".into();
+        }
     }
-    state.phase_name =
-        "RUNNING APPLE NATIVE networkQuality (Parallel HTTP/2 RPM Benchmark)...".into();
-    state.progress_pct = 10.0;
+    if let Ok(mut s) = shared.lock() {
+        s.phase_name =
+            "RUNNING APPLE NATIVE networkQuality (Parallel HTTP/2 RPM Benchmark)...".into();
+        s.progress_pct = 10.0;
+    }
 
     let out = super::cmd::run(&["networkQuality", "-c"], Duration::from_secs(24));
+    let mut s = shared.lock().unwrap();
+    let state = &mut *s;
     let ret = if let Ok(data) = serde_json::from_str::<serde_json::Value>(&out.stdout) {
         let dl_bps = data
             .get("dl_throughput")
@@ -550,5 +612,40 @@ impl SpeedtestView {
             rtt_history: s.rtt_history.clone(),
             last_run_ts: s.last_run_ts.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod anim_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn speedtest_publishes_live_progress() {
+        // Run a quick suite on a background thread and sample progress_pct from
+        // the "UI" thread. If animation works, progress climbs through
+        // intermediate values rather than jumping 0 -> 100.
+        let shared: Shared = Arc::new(Mutex::new(SpeedtestState::default()));
+        let s2 = Arc::clone(&shared);
+        let target = std::net::Ipv4Addr::new(1, 1, 1, 1);
+        let h = thread::spawn(move || {
+            run_full_suite(&s2, target, true);
+        });
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..60 {
+            thread::sleep(Duration::from_millis(120));
+            if let Ok(s) = shared.lock() {
+                seen.insert(s.progress_pct as i64);
+                if !s.is_running.load(Ordering::Relaxed) && s.progress_pct >= 100.0 {
+                    break;
+                }
+            }
+        }
+        h.join().unwrap();
+        // We must have observed several distinct intermediate progress values,
+        // not just {0, 100} — that's the proof the UI can animate.
+        assert!(seen.len() >= 4, "only saw progress values {seen:?}; animation would be a jump");
     }
 }

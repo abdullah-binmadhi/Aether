@@ -96,6 +96,18 @@ impl Tab {
             Tab::SpeedTest => Tab::Tuning,
         }
     }
+
+    /// Icon + full label for the left nav rail (no truncation — the rail is a
+    /// fixed generous width, so this replaces the old cramped top tab strip).
+    pub fn nav(self) -> (&'static str, &'static str, u8) {
+        match self {
+            Tab::Dashboard => ("◉", "OVERVIEW", 1),
+            Tab::Spectrum => ("◈", "AIRSPACE", 2),
+            Tab::Processes => ("◈", "PROCESSES", 3),
+            Tab::Tuning => ("⚙", "TUNE & FIX", 4),
+            Tab::SpeedTest => ("⚡", "SPEED TEST", 5),
+        }
+    }
 }
 
 pub struct App {
@@ -121,7 +133,9 @@ pub struct App {
     pub router_bot: RouterBot,
     pub orchestrator: Orchestrator,
     pub preset: PresetEngine,
-    pub speedtest: SpeedtestState,
+    /// Shared so a background speedtest thread can update it live while the
+    /// worker keeps publishing snapshots (that's what animates the UI).
+    pub speedtest: std::sync::Arc<std::sync::Mutex<SpeedtestState>>,
 
     // Snapshots / derived data for the UI.
     pub telemetry: Telemetry,
@@ -138,6 +152,7 @@ pub struct App {
     // UI state.
     pub active_tab: Tab,
     pub proc_cursor: usize,
+    pub tune_cursor: usize,
     pub visual_mode: u8,
     pub status_msg: String,
     pub should_quit: bool,
@@ -191,7 +206,7 @@ impl App {
             router_bot,
             orchestrator: Orchestrator::new(interface, "Wi-Fi"),
             preset: PresetEngine::new(),
-            speedtest: SpeedtestState::default(),
+            speedtest: std::sync::Arc::new(std::sync::Mutex::new(SpeedtestState::default())),
             telemetry,
             scope_snap,
             spectrum,
@@ -215,6 +230,7 @@ impl App {
             },
             active_tab: Tab::Dashboard,
             proc_cursor: 0,
+            tune_cursor: 0,
             visual_mode: 1,
             status_msg: "Ready. [Tab] switch view  [D] Doctor  [G] Boost  [5] SpeedTest  [Q] quit"
                 .into(),
@@ -369,6 +385,153 @@ impl App {
         }
     }
 
+    /// True while a background speedtest thread is running (worker uses this to
+    /// publish on a fast cadence so the UI animates).
+    pub fn is_speedtest_running(&self) -> bool {
+        self.speedtest
+            .lock()
+            .map(|s| s.is_running.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    fn spawn_speedtest(&self, target: std::net::Ipv4Addr, quick: bool) {
+        let shared = std::sync::Arc::clone(&self.speedtest);
+        std::thread::spawn(move || {
+            speedtest::run_full_suite(&shared, target, quick);
+        });
+    }
+
+    fn spawn_apple_rpm(&self) {
+        let shared = std::sync::Arc::clone(&self.speedtest);
+        std::thread::spawn(move || {
+            speedtest::run_apple_network_quality(&shared);
+        });
+    }
+
+    /// Build the TUNE & FIX page rows (toggles + one-shot actions) with a
+    /// plain-English label and description for each, so nothing needs a manual.
+    pub fn build_tune_rows(&self) -> Vec<crate::render::TuneRow> {
+        use crate::render::{TuneKind, TuneRow};
+        let controls = self.preset.get_tuning_controls(
+            &self.telemetry,
+            &self.kernel_state,
+            &self.wan_snap,
+            self.antilag.root_authorized,
+            self.antilag.sync_daemons_frozen,
+        );
+        let state_of = |id: &str| controls.iter().find(|c| c.id == id).map(|c| c.active);
+
+        let mut rows = Vec::new();
+        rows.push(TuneRow {
+            kind: TuneKind::Header,
+            label: "TOGGLES — persistent settings (Space to flip)".into(),
+            detail: String::new(),
+            state: None,
+        });
+        // (id, friendly label, one-line description)
+        let toggles = [
+            (
+                "zero_lag",
+                "Zero-Lag Mode",
+                "Silence AWDL/AirDrop hopping & pause iCloud sync for 0ms jitter",
+            ),
+            (
+                "wmm_vip",
+                "WMM VIP Airtime Priority",
+                "Put your traffic in the 802.11e voice/video priority queue",
+            ),
+            (
+                "cam_pacer",
+                "25Hz CAM Anti-Sleep Pacer",
+                "Keep the Wi-Fi radio awake so it never DTIM-sleeps mid-game",
+            ),
+            (
+                "ffxiv_nodelay",
+                "Gaming TCP No-Delay",
+                "delayed_ack=0 + 30ms fast retransmit for lowest input lag",
+            ),
+            (
+                "buf_8mb",
+                "32MB High-BDP Buffers",
+                "Bigger TCP window so 4K/large downloads aren't capped",
+            ),
+            (
+                "ipv6_guard",
+                "IPv6 Link-Local Guard",
+                "Force clean IPv4 routing when IPv6 is slow/asymmetric",
+            ),
+            (
+                "quic_fastpath",
+                "QUIC → HTTP/2 Fast-Path",
+                "Bypass UDP 443 policing by forcing TCP HTTP/2",
+            ),
+            (
+                "sync_freeze",
+                "Sync Daemon Freezer",
+                "Freeze background iCloud/photo sync that bloats upload",
+            ),
+            (
+                "mtu_clamp",
+                "Fiber/PPPoE MTU Clamp",
+                "Clamp MTU to 1492 to stop packet fragmentation",
+            ),
+        ];
+        for (id, label, detail) in toggles {
+            rows.push(TuneRow {
+                kind: TuneKind::Toggle,
+                label: label.into(),
+                detail: detail.into(),
+                state: state_of(id),
+            });
+        }
+        rows.push(TuneRow {
+            kind: TuneKind::Header,
+            label: "ONE-SHOT ACTIONS — run once (Enter/Space to run)".into(),
+            detail: String::new(),
+            state: None,
+        });
+        let actions = [
+            (
+                "God-Mode Boost",
+                "Apply every optimization at once for the current network",
+            ),
+            (
+                "WAN & YouTube Doctor",
+                "Diagnose & heal DNS, MTU, IPv6 and gateway in 8 stages",
+            ),
+            (
+                "Fix macOS \"!\" Mark",
+                "Restore DHCP DNS & refresh the Wi-Fi agent",
+            ),
+            (
+                "Root Authorization",
+                "Install a passwordless sudoers rule to lock kernel tuning",
+            ),
+            (
+                "Export Diagnostic Ticket",
+                "Write a timestamped Markdown ISP report to ~/.config",
+            ),
+        ];
+        for (label, detail) in actions {
+            rows.push(TuneRow {
+                kind: TuneKind::Run,
+                label: label.into(),
+                detail: detail.into(),
+                state: None,
+            });
+        }
+        rows
+    }
+
+    /// Indices of selectable (non-header) tune rows, in order.
+    pub fn tune_selectable(rows: &[crate::render::TuneRow]) -> Vec<usize> {
+        rows.iter()
+            .enumerate()
+            .filter(|(_, r)| r.kind != crate::render::TuneKind::Header)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Build a cloneable render snapshot for the UI thread. Precomputes the
     /// preset controls, cockpit analysis, and visual-deck lines so the UI never
     /// calls an engine method.
@@ -390,7 +553,14 @@ impl App {
             &self.wan_snap,
             self.antilag.root_authorized,
         );
-        let speed_snapshot = speedtest::snapshot(&self.speedtest, &self.telemetry);
+        let tune_rows = self.build_tune_rows();
+        let speed_view;
+        let speed_snapshot;
+        {
+            let st = self.speedtest.lock().unwrap();
+            speed_view = SpeedtestView::from_state(&st);
+            speed_snapshot = speedtest::snapshot(&st, &self.telemetry);
+        }
         let deck_lines = crate::ui::widgets::deck_body(self, self.visual_mode, 80, 7);
 
         let hops = self
@@ -432,9 +602,11 @@ impl App {
             lan_data: self.lan_data.clone(),
             socket_sample: self.socket_sample.clone(),
             processes: self.procmon.last.clone(),
-            speedtest: SpeedtestView::from_state(&self.speedtest),
+            speedtest: speed_view,
             speedtest_snapshot: speed_snapshot,
             tuning_controls: controls,
+            tune_rows,
+            tune_cursor: self.tune_cursor,
             cockpit_analysis: analysis,
             preset_effective_id: self.preset.effective_preset_id,
             preset_selected_id: self.preset.selected_preset_id,
@@ -450,7 +622,7 @@ impl App {
             active_tab: self.active_tab,
             proc_cursor: self.proc_cursor,
             status_msg: self.status_msg.clone(),
-            busy: self.busy,
+            busy: self.busy || self.is_speedtest_running(),
             pw_edit_active: self.pw_edit_active,
             pw_edit_ssid: self.pw_edit_ssid.clone(),
             pw_edit_buf: self.pw_edit_buf.clone(),
@@ -470,14 +642,24 @@ impl App {
                 if tab == Tab::Processes && !self.procmon.last.is_empty() {
                     self.proc_cursor = (self.proc_cursor + 1).min(self.procmon.last.len() - 1);
                 } else if tab == Tab::Tuning {
-                    self.preset.cursor_idx = (self.preset.cursor_idx + 1) % 12;
+                    let rows = self.build_tune_rows();
+                    let sel = App::tune_selectable(&rows);
+                    if !sel.is_empty() {
+                        let pos = sel.iter().position(|&i| i == self.tune_cursor).unwrap_or(0);
+                        self.tune_cursor = sel[(pos + 1) % sel.len()];
+                    }
                 }
             }
             CursorUp => {
                 if tab == Tab::Processes {
                     self.proc_cursor = self.proc_cursor.saturating_sub(1);
                 } else if tab == Tab::Tuning {
-                    self.preset.cursor_idx = (self.preset.cursor_idx + 11) % 12;
+                    let rows = self.build_tune_rows();
+                    let sel = App::tune_selectable(&rows);
+                    if !sel.is_empty() {
+                        let pos = sel.iter().position(|&i| i == self.tune_cursor).unwrap_or(0);
+                        self.tune_cursor = sel[(pos + sel.len() - 1) % sel.len()];
+                    }
                 } else {
                     self.status_msg = self.scope.toggle_cam_pacer();
                 }
@@ -518,7 +700,8 @@ impl App {
                     .isp_ip
                     .parse()
                     .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
-                self.status_msg = speedtest::run_full_suite(&mut self.speedtest, target, false);
+                self.spawn_speedtest(target, false);
+                self.status_msg = "Running full multi-stream speed & bufferbloat suite...".into();
             }
             SpeedQuick => {
                 let target = self
@@ -526,10 +709,12 @@ impl App {
                     .isp_ip
                     .parse()
                     .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
-                self.status_msg = speedtest::run_full_suite(&mut self.speedtest, target, true);
+                self.spawn_speedtest(target, true);
+                self.status_msg = "Running 5-second quick speed & bufferbloat burst...".into();
             }
             SpeedApple => {
-                self.status_msg = speedtest::run_apple_network_quality(&mut self.speedtest)
+                self.spawn_apple_rpm();
+                self.status_msg = "Running Apple networkQuality RPM benchmark...".into();
             }
             CyclePreset => {
                 self.preset.cycle_preset();
@@ -737,69 +922,57 @@ impl App {
                     self.status_msg = self.procmon.toggle_pause(p.pid, &p.name);
                 }
             }
-            Tab::Tuning => self.toggle_tuning_control(),
+            Tab::Tuning => self.run_selected_tune_row(),
             Tab::SpeedTest => {
                 let target = self
                     .scope
                     .isp_ip
                     .parse()
                     .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
-                self.status_msg = speedtest::run_full_suite(&mut self.speedtest, target, false);
+                self.spawn_speedtest(target, false);
+                self.status_msg = "Running full multi-stream speed & bufferbloat suite...".into();
             }
             _ => {}
         }
     }
 
-    fn toggle_tuning_control(&mut self) {
-        let idx = self.preset.cursor_idx;
-        let controls = self.preset.get_tuning_controls(
-            &self.telemetry,
-            &self.kernel_state,
-            &self.wan_snap,
-            self.antilag.root_authorized,
-            self.antilag.sync_daemons_frozen,
-        );
-        let Some(ctrl) = controls.get(idx.min(controls.len().saturating_sub(1))) else {
+    fn run_selected_tune_row(&mut self) {
+        let rows = self.build_tune_rows();
+        let Some(row) = rows.get(self.tune_cursor) else {
             return;
         };
-        let id = ctrl.id;
-        self.status_msg = match id {
-            "wmm_vip" => self.kernel.toggle_wmm_vip_priority(None),
-            "cam_pacer" => self.scope.toggle_cam_pacer(),
-            "ffxiv_nodelay" => self.kernel.toggle_ffxiv_tcp_nodelay(None),
-            "buf_8mb" => self.kernel.toggle_8mb_streaming_buffers(None),
-            "wan_doctor" => {
-                let (_, m) = self
-                    .wan_doctor
-                    .run_auto_doctor(Some(&mut self.kernel), false);
-                self.wan_snap = self.wan_doctor.get_snapshot();
+        // Dispatch by the plain-English label (stable identifiers).
+        self.status_msg = match row.label.as_str() {
+            "Zero-Lag Mode" => {
+                let mut tel = self.telemetry.clone();
+                let m = self.antilag.toggle_awdl(Some(&mut tel));
+                self.telemetry = tel;
+                self.profiles
+                    .set_zero_lag_mode(self.antilag.zero_lag_active);
                 m
             }
-            "ipv6_guard" => {
+            "WMM VIP Airtime Priority" => self.kernel.toggle_wmm_vip_priority(None),
+            "25Hz CAM Anti-Sleep Pacer" => self.scope.toggle_cam_pacer(),
+            "Gaming TCP No-Delay" => self.kernel.toggle_ffxiv_tcp_nodelay(None),
+            "32MB High-BDP Buffers" => self.kernel.toggle_8mb_streaming_buffers(None),
+            "IPv6 Link-Local Guard" => {
                 let r = self.wan_doctor.toggle_ipv6_guard(None).1;
                 self.wan_snap = self.wan_doctor.get_snapshot();
                 r
             }
-            "quic_fastpath" => {
+            "QUIC → HTTP/2 Fast-Path" => {
                 let r = self.wan_doctor.toggle_quic_fastpath(None).1;
                 self.wan_snap = self.wan_doctor.get_snapshot();
                 r
             }
-            "zero_lag" => {
-                let mut tel = self.telemetry.clone();
-                let m = self.antilag.toggle_awdl(Some(&mut tel));
-                self.telemetry = tel;
-                m
-            }
-            "sync_freeze" => {
+            "Sync Daemon Freezer" => {
                 let (_, z) = self.wan_doctor.reap_zombie_sockets();
                 let s = self
                     .antilag
                     .toggle_sync_daemons(!self.antilag.sync_daemons_frozen);
                 format!("{z} │ {s}")
             }
-            "band_5g" => "5GHz sibling lock requires networksetup association.".into(),
-            "mtu_clamp" => {
+            "Fiber/PPPoE MTU Clamp" => {
                 let new_mtu = if self.telemetry.mtu >= 1500 {
                     1492
                 } else {
@@ -807,9 +980,41 @@ impl App {
                 };
                 self.kernel.set_optimal_mtu(new_mtu)
             }
-            "root_auth" => self.antilag.authorize_root_privileges(),
+            "God-Mode Boost" => {
+                self.profiles.set_zero_lag_mode(true);
+                self.scope.cam_pacer_active = true;
+                let (_, doc) = self
+                    .wan_doctor
+                    .run_auto_doctor(Some(&mut self.kernel), false);
+                let boost = {
+                    let tel = self.telemetry.clone();
+                    self.antilag
+                        .run_god_mode_boost(&tel, &self.dns, &mut self.kernel)
+                };
+                self.dns_results = self.dns.race_resolvers();
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                format!("{boost} │ {doc}")
+            }
+            "WAN & YouTube Doctor" => {
+                let (_, doc) = self
+                    .wan_doctor
+                    .run_auto_doctor(Some(&mut self.kernel), false);
+                self.dns_results = self.dns.race_resolvers();
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                doc
+            }
+            "Fix macOS \"!\" Mark" => self.wan_doctor.fix_macos_exclamation_mark().1,
+            "Root Authorization" => self.antilag.authorize_root_privileges(),
+            "Export Diagnostic Ticket" => {
+                let hist = self.telemetry.history_summary.clone();
+                crate::core::ticket::export_report(&self.telemetry, &self.scope_snap, Some(&hist)).1
+            }
             _ => "Module updated.".into(),
         };
+    }
+
+    fn toggle_tuning_control(&mut self) {
+        let _ = self; // replaced by run_selected_tune_row; kept as a no-op stub
     }
 }
 

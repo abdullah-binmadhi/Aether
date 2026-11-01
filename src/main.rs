@@ -309,9 +309,12 @@ fn run_cli_speedtest(cli: &Cli) -> io::Result<()> {
         .isp_ip
         .parse()
         .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
-    let mut st = core::speedtest::SpeedtestState::default();
+    let shared = core::speedtest::Shared::new(std::sync::Mutex::new(
+        core::speedtest::SpeedtestState::default(),
+    ));
     println!("// RUNNING WIFI COCKPIT // MULTI-STREAM SPEED & BUFFERBLOAT SUITE //");
-    let msg = core::speedtest::run_full_suite(&mut st, target, true);
+    let msg = core::speedtest::run_full_suite(&shared, target, true);
+    let st = shared.lock().unwrap();
     let snap = core::speedtest::snapshot(&st, &tel);
     println!("{msg}");
     println!(
@@ -579,7 +582,14 @@ fn worker_loop(
         }
 
         // Drain any pending actions (each may block; that's fine off the UI thread).
-        match rx.recv_timeout(Duration::from_millis(120)) {
+        // While a background speedtest runs, poll fast so live progress is
+        // republished ~10x/sec and the UI animates.
+        let poll = if app.is_speedtest_running() {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(120)
+        };
+        match rx.recv_timeout(poll) {
             Ok(action) => {
                 let heavy = is_heavy(&action);
                 if heavy {
@@ -616,6 +626,12 @@ fn worker_loop(
         }
 
         // Periodic background refresh.
+        // While a speedtest runs on its background thread, republish each cycle
+        // so the growing bars, climbing numbers and scrolling scope animate.
+        if app.is_speedtest_running() {
+            publish(&shared, &app);
+        }
+
         if last_refresh.elapsed() >= refresh_every {
             app.refresh();
             last_refresh = Instant::now();
@@ -635,9 +651,6 @@ fn is_heavy(a: &Action) -> bool {
         a,
         Doctor
             | Boost
-            | SpeedFull
-            | SpeedQuick
-            | SpeedApple
             | Hop2Repair
             | Prewarm
             | ZombieSync

@@ -1,28 +1,37 @@
 //! Amber CRT terminal UI built on ratatui. Renders purely from a `RenderState`
 //! snapshot — the UI thread never touches an engine, so it is always responsive.
+//!
+//! Layout (the v3 "grand cockpit"):
+//!   ┌──────────┬───────────────────────────────────────────┐
+//!   │ NAV RAIL │ HEADER (ssid · band · rate · health)       │
+//!   │          ├───────────────────────────────────────────┤
+//!   │ ◉ OVER   │ BODY (the active page)                     │
+//!   │ ◈ AIR    │                                            │
+//!   │ ...      ├───────────────────────────────────────────┤
+//!   │          │ CONTEXT FOOTER (status + per-page keys)     │
+//!   └──────────┴───────────────────────────────────────────┘
 
 mod theme;
 mod views;
 pub mod widgets;
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::Tab;
 use crate::render::RenderState;
-use theme::{amber, amber_bold, dim, invert, score_color};
+use theme::{alert, amber, amber_bold, dim, good, invert, score_color};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const RAIL_W: u16 = 16;
 
-/// Top-level draw: vital bar, active view, command deck. `spin` advances the
-/// busy spinner frame.
 pub fn draw(f: &mut Frame, rs: &RenderState, spin: usize) {
     let area = f.area();
-    if area.height < 12 || area.width < 60 {
+    if area.height < 14 || area.width < 64 {
         let msg = Paragraph::new(format!(
-            "Terminal too small ({}x{}). Resize to at least 60x12.",
+            "Terminal too small ({}x{}). Resize to at least 64x14.",
             area.width, area.height
         ))
         .style(ratatui::style::Style::new().fg(ratatui::style::Color::Red));
@@ -30,93 +39,155 @@ pub fn draw(f: &mut Frame, rs: &RenderState, spin: usize) {
         return;
     }
 
-    let chunks = Layout::vertical([
-        Constraint::Length(2), // vital bar
-        Constraint::Min(6),    // body
-        Constraint::Length(2), // command deck
-    ])
-    .split(area);
+    // Split: nav rail | right column.
+    let cols = Layout::horizontal([Constraint::Length(RAIL_W), Constraint::Min(40)]).split(area);
+    draw_nav_rail(f, rs, cols[0]);
 
-    draw_vital_bar(f, rs, chunks[0]);
+    let right = Layout::vertical([
+        Constraint::Length(3), // header
+        Constraint::Min(6),    // body
+        Constraint::Length(2), // context footer
+    ])
+    .split(cols[1]);
+
+    draw_header(f, rs, right[0]);
     match rs.active_tab {
-        Tab::Dashboard => views::dashboard::render(f, rs, chunks[1]),
-        Tab::Spectrum => views::spectrum::render(f, rs, chunks[1]),
-        Tab::Processes => views::processes::render(f, rs, chunks[1]),
-        Tab::Tuning => views::optimizer::render(f, rs, chunks[1]),
-        Tab::SpeedTest => views::speedtest::render(f, rs, chunks[1]),
+        Tab::Dashboard => views::dashboard::render(f, rs, right[1]),
+        Tab::Spectrum => views::spectrum::render(f, rs, right[1]),
+        Tab::Processes => views::processes::render(f, rs, right[1]),
+        Tab::Tuning => views::optimizer::render(f, rs, right[1]),
+        Tab::SpeedTest => views::speedtest::render(f, rs, right[1]),
     }
-    draw_command_deck(f, rs, chunks[2], spin);
+    draw_context_footer(f, rs, right[2], spin);
 }
 
-fn draw_vital_bar(f: &mut Frame, rs: &RenderState, area: Rect) {
+/// Per-page health glyph so a problem shows in the rail without visiting it.
+fn tab_status(rs: &RenderState, tab: Tab) -> (&'static str, ratatui::style::Style) {
+    let ok = ("●", good());
+    let warn = ("!", alert());
+    match tab {
+        Tab::Dashboard => {
+            if rs.telemetry.health_score >= 72 {
+                ok
+            } else {
+                warn
+            }
+        }
+        Tab::Spectrum => {
+            if rs.spectrum.collisions.is_empty() {
+                ok
+            } else {
+                warn
+            }
+        }
+        Tab::Processes => {
+            if rs.processes.iter().any(|p| p.is_hog) {
+                warn
+            } else {
+                ok
+            }
+        }
+        Tab::Tuning => {
+            if rs.wan_snap.ecs_dns_optimal {
+                ok
+            } else {
+                warn
+            }
+        }
+        Tab::SpeedTest => ok,
+    }
+}
+
+fn draw_nav_rail(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let block = Block::default().borders(Borders::RIGHT).border_style(dim());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines = vec![
+        Line::from(Span::styled(" WIFI", amber_bold())),
+        Line::from(Span::styled(" RUST", amber_bold())),
+        Line::from(""),
+    ];
+    for t in Tab::all() {
+        let (icon, label, num) = t.nav();
+        let (glyph, gstyle) = tab_status(rs, t);
+        let active = t == rs.active_tab;
+        if active {
+            // Highlight the whole row.
+            lines.push(Line::from(vec![
+                Span::styled(format!("{icon} "), invert()),
+                Span::styled(format!("{label} "), invert()),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{num} "), dim()),
+                Span::styled(format!("{icon} "), amber()),
+                Span::styled(label, amber()),
+                Span::raw(" "),
+                Span::styled(glyph, gstyle),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" p palette", dim())));
+    lines.push(Line::from(Span::styled(" q quit", dim())));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_header(f: &mut Frame, rs: &RenderState, area: Rect) {
     let tel = &rs.telemetry;
+    let block = Block::default().borders(Borders::ALL).border_style(amber());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    let mut spans = vec![Span::styled(" // WIFI COCKPIT v2 // ", invert())];
-    spans.push(Span::raw(" "));
-
-    let ssid_disp = if tel.ssid_available {
+    let ssid = if tel.ssid_available {
         tel.ssid.clone()
     } else {
         format!("{} (inferred)", tel.ssid)
     };
-    spans.push(Span::styled(
-        format!(
-            "● {} ({}) │ {} Mbps │ ",
-            ssid_disp,
-            tel.band.label(),
-            tel.tx_rate_mbps
+    let (_icon, page, _n) = rs.active_tab.nav();
+    let left = Line::from(vec![
+        Span::styled(format!(" {page} "), invert()),
+        Span::raw("  "),
+        Span::styled(
+            format!(
+                "● {ssid}  ·  {}  ·  {} Mbps",
+                tel.band.label(),
+                tel.tx_rate_mbps
+            ),
+            amber(),
         ),
-        amber(),
-    ));
-    spans.push(Span::styled(
-        format!("{}/100 [{}]", tel.health_score, tel.health_rating.label()),
-        score_color(tel.health_score),
-    ));
+    ]);
+    let right = Line::from(vec![
+        Span::styled(
+            format!("HEALTH {}/100 ", tel.health_score),
+            score_color(tel.health_score),
+        ),
+        Span::styled(
+            format!("[{}] ", tel.health_rating.label()),
+            score_color(tel.health_score),
+        ),
+    ]);
 
-    let mut tab_spans = Vec::new();
-    for t in Tab::all() {
-        let style = if t == rs.active_tab {
-            invert()
-        } else {
-            amber_bold()
-        };
-        tab_spans.push(Span::styled(format!(" {} ", t.short(area.width)), style));
-    }
-
-    let chunks = Layout::horizontal([Constraint::Min(10), Constraint::Length(58)]).split(area);
-    f.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
-    f.render_widget(
-        Paragraph::new(Line::from(tab_spans)).right_aligned(),
-        chunks[1],
-    );
-
-    let rule = "━".repeat(area.width as usize);
-    let rule_area = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: 1,
-    };
-    f.render_widget(Paragraph::new(rule).style(dim()), rule_area);
+    let chunks = Layout::horizontal([Constraint::Min(20), Constraint::Length(26)]).split(inner);
+    f.render_widget(Paragraph::new(left), chunks[0]);
+    f.render_widget(Paragraph::new(right).alignment(Alignment::Right), chunks[1]);
 }
 
-fn draw_command_deck(f: &mut Frame, rs: &RenderState, area: Rect, spin: usize) {
+fn draw_context_footer(f: &mut Frame, rs: &RenderState, area: Rect, spin: usize) {
     let keys = match rs.active_tab {
-        Tab::Dashboard => " [M]Visual [O]Hop2 [D]Doctor [E]WiFi-Key [R]Roam [G]Boost [L]Zero-Lag [J]Ticket [Q]Quit ",
-        Tab::Spectrum => " [E]WiFi-Key [R]Roam [B]Lock-5GHz [S]SweetSpot [C]Gateway [J]Ticket [Q]Quit ",
-        Tab::Processes => " [j/k]Select [Space]Pause(SIGSTOP) [B]Shape [N]Scan-LAN [U]Resume [Q]Quit ",
-        Tab::Tuning => " [j/k]Select [Space]Toggle [D]Doctor [F]Clear-DNS [P]Preset [A]Auto [6]IPv6 [S]Root ",
-        Tab::SpeedTest => " [Space]Full-Suite [V]Quick-5s [N]Apple-RPM [D]Doctor [G]Boost [Q]Quit ",
+        Tab::Dashboard => " [Enter] action palette   [R] rescan   [L] zero-lag   [1-5] pages ",
+        Tab::Spectrum => " [R] rescan airspace   [S] sweet-spot locator   [1-5] pages ",
+        Tab::Processes => " [↑↓] select   [Space] pause/resume   [B] throttle   [N] LAN sweep ",
+        Tab::Tuning => " [↑↓] select   [Space] toggle / run   [P] cycle preset   [A] auto-pilot ",
+        Tab::SpeedTest => " [Space] full test   [V] quick 5s   [N] Apple RPM ",
     };
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 
     let (prefix, style) = if rs.busy {
-        (
-            format!(" [{}] ", SPINNER[spin % SPINNER.len()]),
-            theme::good(),
-        )
+        (format!(" {} ", SPINNER[spin % SPINNER.len()]), good())
     } else {
-        (" >> ".to_string(), amber_bold())
+        (" › ".to_string(), amber_bold())
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
