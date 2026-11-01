@@ -1,0 +1,35 @@
+[package]
+name = "wifi-tui"
+version = "2.0.0"
+edition = "2021"
+description = "Amber CRT macOS Wi-Fi Cockpit: RF telemetry, 4-hop bufferbloat matrix, spectrum radar & per-process firewall — native Rust rebuild"
+license = "MIT"
+authors = ["Abdullah Bin Madhi"]
+readme = "README.md"
+repository = "https://github.com/abdullah-binmadhi/WIFI-TUI"
+
+[[bin]]
+name = "wifi-tui"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+netdev = "0.47.0"
+objc2 = "0.6.5"
+objc2-core-wlan = "0.3.2"
+objc2-foundation = "0.3.2"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+signal-hook = "0.4.6"
+socket2 = "0.6.5"
+thiserror = "2.0.21"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+[lints.rust]
+# unsafe is confined to the CoreWLAN FFI module, which re-allows it locally.
+unsafe_code = "deny"
