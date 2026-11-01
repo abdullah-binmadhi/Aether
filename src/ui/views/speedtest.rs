@@ -48,44 +48,118 @@ pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
     render_gauges(f, rs, mid[0], snap);
     render_scorecard(f, rs, mid[1]);
 
-    // Oscilloscope.
+    // Oscilloscope — a tall stacked graph that fills the panel instead of 3
+    // lonely sparklines with a huge empty bottom.
     let scope_block = titled_block("REAL-TIME THROUGHPUT & LOADED PING OSCILLOSCOPE");
     let si = scope_block.inner(rows[3]);
     f.render_widget(scope_block, rows[3]);
-    let spark_w = (si.width as usize).saturating_sub(18).max(12);
-    let scope_lines = vec![
-        Line::from(Span::styled(
-            format!(
-                "▼ DOWN Mbps  {}  {:5.1}M",
-                sparkline(&st.down_history, spark_w, 1.0),
-                st.down_mbps
-            ),
-            good(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "▲ UP   Mbps  {}  {:5.1}M",
-                sparkline(&st.up_history, spark_w, 1.0),
-                st.up_mbps
-            ),
-            amber(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "◆ LOAD RTT   {}  {:5.1}ms",
-                sparkline(&st.rtt_history, spark_w, 5.0),
-                st.loaded_down_rtt_ms
-            ),
-            amber(),
-        )),
-    ];
-    f.render_widget(Paragraph::new(scope_lines), si);
+    render_oscilloscope(f, st, si);
 
     // Workloads + interpretation.
     let bot =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[4]);
     render_workloads(f, bot[0], snap);
     render_interpretation(f, bot[1], snap);
+}
+
+fn render_oscilloscope(f: &mut Frame, st: &crate::core::speedtest::SpeedtestView, area: Rect) {
+    use crate::ui::widgets::render_2d_vertical_graph;
+    if area.height < 3 {
+        return;
+    }
+    let w = area.width as usize;
+    let h = area.height as usize;
+
+    // Short-panel fallback: three compact sparklines (never garbage).
+    if h < 8 {
+        let spark_w = w.saturating_sub(18).max(12);
+        let lines = vec![
+            Line::from(Span::styled(
+                format!(
+                    "▼ DOWN {}  {:5.1}M",
+                    sparkline(&st.down_history, spark_w, 1.0),
+                    st.down_mbps
+                ),
+                good(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "▲ UP   {}  {:5.1}M",
+                    sparkline(&st.up_history, spark_w, 1.0),
+                    st.up_mbps
+                ),
+                amber(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "◆ RTT  {}  {:5.1}ms",
+                    sparkline(&st.rtt_history, spark_w, 5.0),
+                    st.loaded_down_rtt_ms
+                ),
+                amber(),
+            )),
+        ];
+        f.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+
+    // Tall layout: DOWNLOAD graph (≈55%), UPLOAD graph (≈30%), RTT spark (rest).
+    let rows = Layout::vertical([
+        Constraint::Percentage(55),
+        Constraint::Percentage(32),
+        Constraint::Min(2),
+    ])
+    .split(area);
+
+    // DOWNLOAD — big vertical block graph.
+    let d = rows[0];
+    let dh = (d.height as usize).saturating_sub(1).max(2);
+    let mut dlines = vec![Line::from(Span::styled(
+        format!(
+            "▼ DOWNLOAD  {:.1} Mbps (peak {:.1})",
+            st.down_mbps, st.peak_down_mbps
+        ),
+        good(),
+    ))];
+    for g in render_2d_vertical_graph(
+        &st.down_history,
+        dh,
+        w,
+        0.0,
+        st.peak_down_mbps.max(10.0),
+        "M",
+    ) {
+        dlines.push(Line::from(Span::styled(g, good())));
+    }
+    f.render_widget(Paragraph::new(dlines), d);
+
+    // UPLOAD — shorter vertical block graph.
+    let u = rows[1];
+    let uh = (u.height as usize).saturating_sub(1).max(2);
+    let mut ulines = vec![Line::from(Span::styled(
+        format!(
+            "▲ UPLOAD    {:.1} Mbps (peak {:.1})",
+            st.up_mbps, st.peak_up_mbps
+        ),
+        amber_bold(),
+    ))];
+    for g in render_2d_vertical_graph(&st.up_history, uh, w, 0.0, st.peak_up_mbps.max(10.0), "M") {
+        ulines.push(Line::from(Span::styled(g, amber())));
+    }
+    f.render_widget(Paragraph::new(ulines), u);
+
+    // LOADED RTT — full-width sparkline anchor row.
+    let r = rows[2];
+    let spark_w = w.saturating_sub(22).max(12);
+    let rlines = vec![Line::from(Span::styled(
+        format!(
+            "◆ LOAD RTT {}  {:.1}ms",
+            sparkline(&st.rtt_history, spark_w, 5.0),
+            st.loaded_down_rtt_ms
+        ),
+        amber(),
+    ))];
+    f.render_widget(Paragraph::new(rlines), r);
 }
 
 fn draw_kpi(f: &mut Frame, rs: &RenderState, area: Rect) {

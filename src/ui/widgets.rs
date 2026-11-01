@@ -34,35 +34,50 @@ fn mcs_info(mcs: i64) -> (&'static str, &'static str, i64, usize, usize, i64) {
     }
 }
 
-/// A multi-row semicircle arc gauge for a 0..100 score. Returns `rows` lines
-/// (plus the value/label are drawn by the caller). This is the bigger sibling of
-/// `health_dial_line` for pages that have vertical room (KPI tiles, speedtest).
-///
-/// The arc is drawn with braille-ish block glyphs across `rows` stacked bands;
-/// each band lights up to the proportion of the score it covers.
-pub fn arc_gauge(score: i64, rows: usize) -> Vec<String> {
-    let rows = rows.clamp(2, 5);
-    let score = score.clamp(0, 100);
-    // Width of the arc grows with rows so it stays roughly semicircular.
-    let width = rows * 4 + 1;
-    let frac = score as f64 / 100.0;
-    let mut out = Vec::with_capacity(rows);
-    for r in 0..rows {
-        // Band r covers the vertical slice [r/rows, (r+1)/rows] of a semicircle.
-        // Compute the half-angle span lit at this height.
-        let y = 1.0 - (r as f64 + 0.5) / rows as f64; // 1=top .. 0=bottom
-                                                      // x extent of the semicircle at height y (unit circle): sqrt(1-y^2).
-        let half = (1.0 - y * y).max(0.0).sqrt();
-        let total_cells = ((half * width as f64).round() as usize).max(1);
-        let lit = ((frac * total_cells as f64).round() as usize).min(total_cells);
-        let pad = (width - total_cells) / 2;
-        let mut line = String::new();
-        line.push_str(&" ".repeat(pad));
-        line.push_str(&"◝".repeat(lit));
-        line.push_str(&"·".repeat(total_cells - lit));
-        out.push(line);
+/// 3x3 block-digit glyphs for 0-9 (plus space). Each digit is 3 rows tall and
+/// 3 cells wide, built from solid blocks so it can NEVER render as stray ticks
+/// (unlike the old arc gauge). Used for the big health/score readout.
+fn big_digit(c: char) -> [&'static str; 3] {
+    match c {
+        '0' => ["███", "█ █", "███"],
+        '1' => ["  █", "  █", "  █"],
+        '2' => ["███", " ██", "██ "],
+        '3' => ["███", " ██", "███"],
+        '4' => ["█ █", "███", "  █"],
+        '5' => ["███", "██ ", "███"],
+        '6' => ["█  ", "███", "███"],
+        '7' => ["███", "  █", "  █"],
+        '8' => ["███", "███", "███"],
+        '9' => ["███", "███", "  █"],
+        _ => ["   ", "   ", "   "],
     }
-    out
+}
+
+/// Render a number as 3 rows of big block digits (e.g. "65"). Digits separated
+/// by one blank column. Every emitted cell is a solid block or a space, so the
+/// result is always a clean, legible readout — this replaces the fragile arc.
+pub fn big_number(n: i64) -> [String; 3] {
+    let s = n.clamp(0, 999).to_string();
+    let mut rows = [String::new(), String::new(), String::new()];
+    for (i, ch) in s.chars().enumerate() {
+        let g = big_digit(ch);
+        for (r, row) in rows.iter_mut().enumerate() {
+            if i > 0 {
+                row.push(' ');
+            }
+            row.push_str(g[r]);
+        }
+    }
+    rows
+}
+
+/// A clean bracketed meter for a 0..100 score: `[████████░░░░]`. `width` is the
+/// number of inner cells. Always solid blocks — never looks broken.
+pub fn score_meter(score: i64, width: usize) -> String {
+    let w = width.max(4);
+    let filled = ((score.clamp(0, 100) as f64 / 100.0) * w as f64).round() as usize;
+    let filled = filled.min(w);
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(w - filled))
 }
 
 /// A labelled horizontal gauge row: `LABEL  ███████░░░░  VALUE unit`.
@@ -451,19 +466,40 @@ mod tests {
     fn vertical_graph_has_requested_rows() {
         let g = render_2d_vertical_graph(&[1.0, 2.0, 3.0], 4, 40, 0.0, 10.0, "m");
         assert_eq!(g.len(), 4);
+        // Several heights must each return exactly that many rows (no clipping /
+        // disappearing graph when a panel grows or shrinks).
+        for h in [2usize, 5, 8, 12] {
+            assert_eq!(
+                render_2d_vertical_graph(&[5.0, 9.0, 2.0, 7.0], h, 60, 0.0, 10.0, "M").len(),
+                h
+            );
+        }
+        // An empty history still produces the requested rows (no panic/garbage).
+        assert_eq!(
+            render_2d_vertical_graph(&[], 6, 40, 0.0, 10.0, "M").len(),
+            6
+        );
     }
 
     #[test]
-    fn arc_gauge_returns_requested_rows_and_clamps() {
-        assert_eq!(arc_gauge(65, 3).len(), 3);
-        // rows clamp to [2,5]
-        assert_eq!(arc_gauge(65, 99).len(), 5);
-        assert_eq!(arc_gauge(65, 0).len(), 2);
-        // 0 and 100 are both drawable without panic.
-        let _ = arc_gauge(0, 4);
-        let full = arc_gauge(100, 4);
-        // At 100% every band should be fully lit (no unlit '·').
-        assert!(full.iter().all(|l| !l.contains('·')));
+    fn big_number_is_three_rows_of_equal_width() {
+        let b = big_number(65);
+        assert_eq!(b.len(), 3);
+        // "65" = two 3-wide digits + 1 separator = 7 cells, all rows equal.
+        assert_eq!(b[0].chars().count(), b[1].chars().count());
+        assert_eq!(b[1].chars().count(), b[2].chars().count());
+        // Only block / space cells — never a stray tick glyph.
+        assert!(b.iter().all(|r| r.chars().all(|c| c == '█' || c == ' ')));
+    }
+
+    #[test]
+    fn score_meter_fills_proportionally_and_is_solid() {
+        let m = score_meter(50, 10);
+        assert_eq!(m.chars().filter(|&c| c == '█').count(), 5);
+        assert_eq!(m.chars().filter(|&c| c == '░').count(), 5);
+        // Clamps.
+        assert_eq!(score_meter(0, 8).chars().filter(|&c| c == '█').count(), 0);
+        assert_eq!(score_meter(100, 8).chars().filter(|&c| c == '█').count(), 8);
     }
 
     #[test]

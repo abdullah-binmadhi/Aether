@@ -7,14 +7,14 @@ use ratatui::Frame;
 
 use crate::core::spectrum;
 use crate::render::RenderState;
-use crate::ui::theme::{alert, amber, amber_bold, bar, good, score_color};
+use crate::ui::theme::{alert, amber, amber_bold, good, score_color};
 use crate::ui::{draw_kpi_strip, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
     let rows = Layout::vertical([
         Constraint::Length(4),
-        Constraint::Percentage(46),
-        Constraint::Min(5),
+        Constraint::Length(9),
+        Constraint::Min(6),
     ])
     .split(area);
     draw_kpi(f, rs, rows[0]);
@@ -81,73 +81,94 @@ fn render_heatmap(f: &mut Frame, rs: &RenderState, area: Rect) {
     let block = titled_block("5GHz & 2.4GHz SPECTRUM CONGESTION & CHANNEL OVERLAP");
     let inner = block.inner(area);
     f.render_widget(block, area);
+    let w = inner.width as usize;
+
+    // Build one row per block (+ a 2.4GHz row). Each is a big occupancy bar
+    // whose length ∝ neighbour count (scaled to the busiest block), colour by
+    // state, with the dBm floor + verdict on the right. This fills the panel
+    // with a readable chart instead of a short table over dead space.
+    struct Row {
+        label: String,
+        count: u32,
+        rssi: i64,
+        colliding: bool,
+        mine: bool,
+    }
+    let mut data: Vec<Row> = report
+        .blocks_5g
+        .iter()
+        .map(|b| Row {
+            label: b.label.to_string(),
+            count: b.count,
+            rssi: if b.count > 0 { b.max_rssi } else { -100 },
+            colliding: b.colliding,
+            mine: b.mine,
+        })
+        .collect();
+    data.push(Row {
+        label: "2.4GHz (1/6/11)".into(),
+        count: report.count_24,
+        rssi: if report.count_24 > 0 {
+            report.max_rssi_24
+        } else {
+            -100
+        },
+        colliding: false,
+        mine: rs.telemetry.band == crate::core::model::Band::Band2_4GHz,
+    });
+
+    let busiest = data.iter().map(|r| r.count).max().unwrap_or(1).max(1);
+    // Bar column = inner width minus label(20) + count/dBm/verdict text (~30).
+    let bar_w = w.saturating_sub(52).clamp(8, 60);
 
     let mut lines = vec![Line::from(Span::styled(
         format!(
-            "{:<20} {:<10} {:<12} {:<16} VERDICT",
-            "BAND / BLOCK", "NEIGHBORS", "PEAK SIGNAL", "DENSITY"
+            "{:<20} {:<22} NEIGHBORS · PEAK · STATE",
+            "BAND / BLOCK", "OCCUPANCY"
         ),
         amber_bold(),
     ))];
 
-    for b in &report.blocks_5g {
-        let rssi = if b.count > 0 { b.max_rssi } else { -100 };
-        let (verdict, style) = if b.colliding {
-            ("[!] COLLISION (YOUR AP + NEIGHBOR)", alert())
-        } else if b.mine {
-            ("● YOUR ACTIVE 5GHz BLOCK", amber_bold())
-        } else if b.count == 0 {
-            ("[OK] 100% CLEAR AIRSPACE", good())
+    for r in &data {
+        let filled = ((r.count as f64 / busiest as f64) * bar_w as f64).round() as usize;
+        let filled = filled.min(bar_w);
+        let gbar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
+        let (state, style) = if r.colliding {
+            ("[!] COLLISION", alert())
+        } else if r.mine {
+            ("● YOUR BLOCK", amber_bold())
+        } else if r.count == 0 {
+            ("[OK] CLEAR", good())
         } else {
-            ("Occupied", amber())
+            ("occupied", amber())
         };
-        let rssi_str = if b.count > 0 {
-            format!("{rssi} dBm")
+        let rssi_str = if r.count > 0 {
+            format!("{} dBm", r.rssi)
         } else {
-            "Clear".into()
+            "clear".into()
         };
         lines.push(Line::from(Span::styled(
             format!(
-                "{:<20} {:<10} {:<12} {:<16} {}",
-                b.label,
-                b.count,
-                rssi_str,
-                bar(rssi as f64, -100.0, -40.0, 12),
-                verdict
+                "{:<20} {gbar} {:>3} · {:<8} · {state}",
+                truncate(&r.label, 20),
+                r.count,
+                rssi_str
             ),
             style,
         )));
     }
 
-    let rssi24 = if report.count_24 > 0 {
-        report.max_rssi_24
-    } else {
-        -95
-    };
-    lines.push(Line::from(Span::styled(
-        format!(
-            "{:<20} {:<10} {:<12} {:<16} 2.4GHz floor",
-            "2.4GHz (1/6/11)",
-            report.count_24,
-            if report.count_24 > 0 {
-                format!("{rssi24} dBm")
-            } else {
-                "Clear".into()
-            },
-            bar(rssi24 as f64, -95.0, -40.0, 12)
-        ),
-        amber(),
-    )));
-
-    lines.push(Line::from(Span::styled(
-        format!(
-            "◆ Recommended: Channel {} — {}  │  {} co-channel collision(s) detected",
-            report.recommended_5g_channel,
-            report.recommendation_reason,
-            report.collisions.len()
-        ),
-        good(),
-    )));
+    // Spacer + recommendation banner, word-wrapped, as the bottom anchor.
+    lines.push(Line::from(Span::raw("")));
+    let banner = format!(
+        "◆ RECOMMENDED: Channel {} — {}  │  {} co-channel collision(s)",
+        report.recommended_5g_channel,
+        report.recommendation_reason,
+        report.collisions.len()
+    );
+    for l in wrap_text(&banner, w) {
+        lines.push(Line::from(Span::styled(l, good())));
+    }
 
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -157,43 +178,102 @@ fn render_neighbors(f: &mut Frame, rs: &RenderState, area: Rect) {
     let block = titled_block("DETECTED LOCAL WI-FI NETWORKS & RF SIGNATURES");
     let inner = block.inner(area);
     f.render_widget(block, area);
+    let w = inner.width as usize;
+
+    // Signal-strength rank chart: strongest first, one RSSI bar per network,
+    // your AP in bold, co-channel neighbours in red. Fills every row the panel
+    // has instead of a short list with dead space below.
+    let bar_w = w.saturating_sub(48).clamp(8, 50);
+    let rssi_bar = |dbm: i64| -> String {
+        let ratio = ((dbm as f64 + 95.0) / 55.0).clamp(0.0, 1.0); // -95..-40
+        let filled = (ratio * bar_w as f64).round() as usize;
+        format!(
+            "{}{}",
+            "█".repeat(filled.min(bar_w)),
+            "░".repeat(bar_w - filled.min(bar_w))
+        )
+    };
 
     let mut lines = vec![Line::from(Span::styled(
-        format!(
-            "{:<26} {:<16} {:<9} POWER",
-            "NETWORK / RF SIGNATURE", "CHANNEL / BAND", "SIGNAL"
-        ),
+        format!("{:<22} {:<13} SIGNAL", "NETWORK", "CHANNEL/BAND"),
         amber_bold(),
     ))];
 
-    // Active AP first.
+    // Active AP always first.
     lines.push(Line::from(Span::styled(
         format!(
-            "{:<26} {:<16} {:<9} {}",
-            truncate(&format!("● {}", tel.ssid), 26),
-            truncate(&tel.channel_label, 16),
-            format!("{} dBm", tel.signal_dbm),
-            bar(tel.signal_dbm as f64, -95.0, -40.0, 8)
+            "● {:<20} {:<13} {} {:>4}dBm",
+            truncate(&tel.ssid, 20),
+            truncate(&tel.channel_label, 13),
+            rssi_bar(tel.signal_dbm),
+            tel.signal_dbm
         ),
         good(),
     )));
 
-    let cap = (inner.height as usize).saturating_sub(2);
-    for n in tel.neighbors.iter().take(cap) {
+    // Neighbours sorted by signal strength (descending).
+    let mut neigh: Vec<&crate::core::model::Neighbor> = tel.neighbors.iter().collect();
+    neigh.sort_by_key(|a| std::cmp::Reverse(a.signal_dbm));
+    let cap = (inner.height as usize).saturating_sub(3);
+    for n in neigh.iter().take(cap) {
         let style = if n.same_channel { alert() } else { amber() };
         lines.push(Line::from(Span::styled(
             format!(
-                "{:<26} {:<16} {:<9} {}",
-                truncate(&n.label, 26),
+                "  {:<20} {:<13} {} {:>4}dBm",
+                truncate(&n.label, 20),
                 format!("{} ({})", n.channel_num, n.band.label()),
-                format!("{} dBm", n.signal_dbm),
-                bar(n.signal_dbm as f64, -95.0, -40.0, 8)
+                rssi_bar(n.signal_dbm),
+                n.signal_dbm
             ),
             style,
         )));
     }
 
+    // Footer summary anchor.
+    let same_ch = tel.neighbors.iter().filter(|n| n.same_channel).count();
+    let strongest = tel
+        .neighbors
+        .iter()
+        .map(|n| n.signal_dbm)
+        .max()
+        .unwrap_or(tel.signal_dbm);
+    lines.push(Line::from(Span::styled(
+        format!(
+            "— {} network(s) · {} on your channel · strongest {} dBm",
+            tel.neighbors.len(),
+            same_ch,
+            strongest
+        ),
+        amber_bold(),
+    )));
+
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Minimal greedy word-wrap for a single paragraph.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(12);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let cand = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
+        if cand.chars().count() <= width {
+            cur = cand;
+        } else {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur = word.to_string();
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn truncate(s: &str, max: usize) -> String {

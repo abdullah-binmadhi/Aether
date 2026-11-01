@@ -165,7 +165,10 @@ fn render_hop_bars(f: &mut Frame, rs: &RenderState, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let w = inner.width as usize;
-    let bar_max = (w.saturating_sub(28)).clamp(6, 40);
+    // Label column holds the full hop name (e.g. "Google Edge"); size the bar
+    // from the REAL inner width so nothing is clipped on a wide panel.
+    let label_w = 12usize;
+    let bar_max = w.saturating_sub(label_w + 16).clamp(6, 48);
 
     // Scale bars to the slowest hop so the longest is full-width.
     let max_rtt = rs
@@ -186,11 +189,12 @@ fn render_hop_bars(f: &mut Frame, rs: &RenderState, area: Rect) {
         };
         lines.push(Line::from(Span::styled(
             format!(
-                "[{}] {:<9} {} {:>6.1}ms",
+                "[{}] {:<width$} {} {:>6.1}ms",
                 h.hop,
-                h.label.chars().take(9).collect::<String>(),
+                truncate(&h.label, label_w),
                 g,
-                h.rtt_ms
+                h.rtt_ms,
+                width = label_w
             ),
             style,
         )));
@@ -201,14 +205,24 @@ fn render_hop_bars(f: &mut Frame, rs: &RenderState, area: Rect) {
     } else {
         alert()
     };
-    lines.push(Line::from(Span::styled(
-        format!("VERDICT: {}", rs.scope_fault),
-        vstyle,
-    )));
+    // Word-wrap the verdict so it never clips at the right edge.
+    lines.push(Line::from(Span::styled("VERDICT:", vstyle)));
+    for l in wrap_text(&rs.scope_fault, w) {
+        lines.push(Line::from(Span::styled(l, vstyle)));
+    }
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Tile 4: arc gauge + WHAT TO DO NOW (word-wrapped) + workload readiness badges.
+/// Truncate to `max` display chars with an ellipsis only when genuinely needed.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
+
+/// Tile 4: big score readout + meter + WHAT TO DO NOW (word-wrapped) + badges.
 fn render_advice(f: &mut Frame, rs: &RenderState, area: Rect) {
     let analysis = &rs.cockpit_analysis;
     let score = rs.telemetry.health_score;
@@ -217,27 +231,30 @@ fn render_advice(f: &mut Frame, rs: &RenderState, area: Rect) {
     f.render_widget(block, area);
     let style = score_color(score);
     let w = inner.width as usize;
+    let label = rs.telemetry.health_rating.label();
 
     let mut lines = Vec::new();
-    // Compact arc gauge header (2 rows) when there's vertical room.
+    // Clean gauge header: 3-row big-block number + meter, never stray ticks.
     if inner.height >= 6 {
-        for (i, g) in crate::ui::widgets::arc_gauge(score, 2)
-            .into_iter()
-            .enumerate()
-        {
-            let suffix = if i == 0 {
-                format!("   {score}/100")
-            } else {
-                format!("   {}", rs.telemetry.health_rating.label())
-            };
-            lines.push(Line::from(vec![
-                Span::styled(g, style),
-                Span::styled(suffix, style),
-            ]));
-        }
+        let digits = crate::ui::widgets::big_number(score);
+        let meter = crate::ui::widgets::score_meter(score, w.saturating_sub(18).clamp(8, 40));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}  ", digits[0]), style),
+            Span::styled(meter, style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}  ", digits[1]), style),
+            Span::styled(format!("{score}/100  {label}"), style),
+        ]));
+        lines.push(Line::from(Span::styled(digits[2].clone(), style)));
     } else {
-        let (dial, label) = crate::ui::widgets::health_dial_line(score);
-        lines.push(Line::from(Span::styled(format!("{dial}  {label}"), style)));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{}  {score}/100  {label}",
+                crate::ui::widgets::score_meter(score, w.saturating_sub(16).clamp(8, 30))
+            ),
+            style,
+        )));
     }
 
     // Recommended action, word-wrapped so nothing truncates.
