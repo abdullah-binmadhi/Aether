@@ -196,3 +196,34 @@ pub fn run_full(tel: &Telemetry) -> RfReport {
         primary_advice,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::model::Telemetry;
+
+    #[test]
+    fn every_detector_confidence_is_a_valid_fraction() {
+        // The AIRSPACE RF-scanner panel renders each detector's confidence as a
+        // 0..=100% bar; confidence must always be a clean fraction in [0,1].
+        let tel = Telemetry::default();
+        let mw = detect_microwave(&tel);
+        let bt = detect_bluetooth(&tel);
+        let (aci, _) = detect_aci(&tel);
+        let dfs = detect_dfs(&tel);
+        for d in [&mw, &bt, &aci, &dfs] {
+            assert!(
+                (0.0..=1.0).contains(&d.confidence),
+                "confidence out of range: {}",
+                d.confidence
+            );
+            // A non-detection must carry zero confidence (empty bar).
+            if !d.detected {
+                assert_eq!(d.confidence, 0.0);
+            }
+        }
+        // The overall report score is always a clamped 10..=100.
+        let rep = run_full(&tel);
+        assert!((10..=100).contains(&rep.rf_health_score));
+    }
+}

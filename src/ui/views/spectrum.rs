@@ -7,19 +7,32 @@ use ratatui::Frame;
 
 use crate::core::spectrum;
 use crate::render::RenderState;
-use crate::ui::theme::{alert, amber, amber_bold, good, score_color};
+use crate::ui::theme::{alert, amber, amber_bold, good, score_color, sparkline};
+use crate::ui::widgets::{big_number, hbar_row, render_2d_vertical_graph, score_meter};
 use crate::ui::{draw_kpi_strip, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
+    // KPI strip · (congestion | sweet-spot) · (networks | RF scanner) · chronograph.
     let rows = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Length(9),
-        Constraint::Min(6),
+        Constraint::Length(4), // KPI strip
+        Constraint::Length(9), // congestion + sweet-spot
+        Constraint::Length(9), // networks + RF scanner
+        Constraint::Min(6),    // signal chronograph (full width)
     ])
     .split(area);
     draw_kpi(f, rs, rows[0]);
-    render_heatmap(f, rs, rows[1]);
-    render_neighbors(f, rs, rows[2]);
+
+    let r1 =
+        Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(rows[1]);
+    render_heatmap(f, rs, r1[0]);
+    render_sweetspot(f, rs, r1[1]);
+
+    let r2 =
+        Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(rows[2]);
+    render_neighbors(f, rs, r2[0]);
+    render_rf_scanner(f, rs, r2[1]);
+
+    render_chronograph(f, rs, rows[3]);
 }
 
 fn draw_kpi(f: &mut Frame, rs: &RenderState, area: Rect) {
@@ -182,17 +195,17 @@ fn render_heatmap(f: &mut Frame, rs: &RenderState, area: Rect) {
 
 fn render_neighbors(f: &mut Frame, rs: &RenderState, area: Rect) {
     let tel = &rs.telemetry;
-    let block = titled_block("DETECTED LOCAL WI-FI NETWORKS & RF SIGNATURES");
+    let block = titled_block("DETECTED LOCAL WI-FI NETWORKS");
     let inner = block.inner(area);
     f.render_widget(block, area);
     let w = inner.width as usize;
 
-    // Each network is a 2-line card: a name/channel line + a full-width RSSI bar
-    // line with extra RF detail. With few APs this fills the tall panel far
-    // better than a one-line list; it compacts to 1 line each when crowded.
-    let bar_w = w.saturating_sub(24).clamp(10, 64);
+    // Compact one-line RSSI rows (the panel is now a sensible height in a
+    // narrower column, not an oversized void). Your AP first, then neighbours
+    // by signal strength.
+    let bar_w = w.saturating_sub(34).clamp(6, 40);
     let rssi_bar = |dbm: i64| -> String {
-        let ratio = ((dbm as f64 + 95.0) / 55.0).clamp(0.0, 1.0); // -95..-40
+        let ratio = ((dbm as f64 + 95.0) / 55.0).clamp(0.0, 1.0);
         let filled = (ratio * bar_w as f64).round() as usize;
         format!(
             "{}{}",
@@ -200,102 +213,236 @@ fn render_neighbors(f: &mut Frame, rs: &RenderState, area: Rect) {
             "░".repeat(bar_w - filled.min(bar_w))
         )
     };
-    let quality = |dbm: i64| -> &'static str {
-        match dbm {
-            d if d >= -55 => "excellent",
-            d if d >= -67 => "good",
-            d if d >= -75 => "fair",
-            _ => "weak",
-        }
-    };
 
-    // Ordered list: your AP first, then neighbours by signal (desc).
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "● {:<16} {:<11} {} {:>4}",
+            truncate(&tel.ssid, 16),
+            truncate(&tel.channel_label, 11),
+            rssi_bar(tel.signal_dbm),
+            tel.signal_dbm
+        ),
+        good(),
+    ))];
+
     let mut neigh: Vec<&crate::core::model::Neighbor> = tel.neighbors.iter().collect();
     neigh.sort_by_key(|a| std::cmp::Reverse(a.signal_dbm));
-
-    // Decide 2-line vs 1-line based on how many we must show vs height.
-    let total = 1 + neigh.len();
-    let avail = (inner.height as usize).saturating_sub(1); // reserve footer
-    let two_line = total * 2 <= avail;
-
-    let mut lines = Vec::new();
-    let push_card =
-        |lines: &mut Vec<Line>, name: String, chan: String, dbm: i64, mine: bool, same: bool| {
-            let head_style = if mine {
-                good()
-            } else if same {
-                alert()
-            } else {
-                amber_bold()
-            };
-            let dot = if mine { "●" } else { " " };
-            let tag = if mine {
-                "  (YOU)"
-            } else if same {
-                "  (co-channel!)"
-            } else {
-                ""
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "{dot} {:<26} {:<16} {:>4} dBm{tag}",
-                    truncate(&name, 26),
-                    chan,
-                    dbm
-                ),
-                head_style,
-            )));
-            if two_line {
-                let body_style = if same { alert() } else { amber() };
-                lines.push(Line::from(Span::styled(
-                    format!("  {} {}", rssi_bar(dbm), quality(dbm)),
-                    body_style,
-                )));
-            }
-        };
-
-    push_card(
-        &mut lines,
-        tel.ssid.clone(),
-        tel.channel_label.clone(),
-        tel.signal_dbm,
-        true,
-        false,
-    );
-    let cap = if two_line {
-        avail.saturating_sub(2) / 2
-    } else {
-        avail.saturating_sub(1)
-    };
+    let cap = (inner.height as usize).saturating_sub(2);
     for n in neigh.iter().take(cap) {
-        push_card(
-            &mut lines,
-            n.label.clone(),
-            format!("Ch{} {}", n.channel_num, n.band.label()),
-            n.signal_dbm,
-            false,
-            n.same_channel,
-        );
+        let style = if n.same_channel { alert() } else { amber() };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {:<16} {:<11} {} {:>4}",
+                truncate(&n.label, 16),
+                format!("Ch{} {}", n.channel_num, n.band.label()),
+                rssi_bar(n.signal_dbm),
+                n.signal_dbm
+            ),
+            style,
+        )));
     }
 
-    // Footer summary anchor.
     let same_ch = tel.neighbors.iter().filter(|n| n.same_channel).count();
-    let strongest = tel
-        .neighbors
-        .iter()
-        .map(|n| n.signal_dbm)
-        .max()
-        .unwrap_or(tel.signal_dbm);
     lines.push(Line::from(Span::styled(
         format!(
-            "— {} network(s) · {} on your channel · strongest {} dBm",
+            "— {} net · {} co-channel · strongest {} dBm",
             tel.neighbors.len(),
             same_ch,
-            strongest
+            tel.neighbors
+                .iter()
+                .map(|n| n.signal_dbm)
+                .max()
+                .unwrap_or(tel.signal_dbm)
         ),
         amber_bold(),
     )));
+    f.render_widget(Paragraph::new(lines), inner);
+}
 
+/// ★ Always-on Sweet-Spot Locator panel: big score, meter, live RF gauges,
+/// Geiger click-rate and a move-this-way hint from the recent signal trend.
+fn render_sweetspot(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let tel = &rs.telemetry;
+    let q = crate::core::acoustic_radar::calculate_quality_score(tel);
+    let block = titled_block("★ SWEET-SPOT LOCATOR ([S] audio scan)");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let w = inner.width as usize;
+
+    let style = if q.score >= 70 {
+        good()
+    } else if q.score >= 50 {
+        amber_bold()
+    } else if q.score >= 30 {
+        amber()
+    } else {
+        alert()
+    };
+
+    // Movement hint from the signal-history trend (warmer = stronger).
+    let hist = &rs.socket_sample.signal_history;
+    let hint = if hist.len() >= 6 {
+        let n = hist.len();
+        let recent: f64 = hist[n - 3..].iter().sum::<f64>() / 3.0;
+        let prior: f64 = hist[n - 6..n - 3].iter().sum::<f64>() / 3.0;
+        if recent > prior + 1.5 {
+            ("↑ WARMER — keep moving this way", good())
+        } else if recent < prior - 1.5 {
+            ("↓ COLDER — go back", alert())
+        } else {
+            ("• HOLD — stable sweet spot", amber())
+        }
+    } else {
+        ("• sampling…", amber())
+    };
+
+    let digits = big_number(q.score);
+    let meter = score_meter(q.score, w.saturating_sub(10).clamp(8, 40));
+    let gbw = w.saturating_sub(22).clamp(6, 24);
+    let lines = vec![
+        Line::from(Span::styled(format!("{}  {}", digits[0], meter), style)),
+        Line::from(vec![
+            Span::styled(format!("{}  ", digits[1]), style),
+            Span::styled(q.rating.to_string(), style),
+        ]),
+        Line::from(Span::styled(
+            format!("{}  {:.1} clicks/s", digits[2], q.click_hz),
+            style,
+        )),
+        Line::from(Span::styled(
+            hbar_row("Signal", q.signal_dbm as f64, -90.0, -40.0, "dBm", gbw),
+            amber(),
+        )),
+        Line::from(Span::styled(
+            hbar_row("SNR", q.snr_db as f64, 5.0, 45.0, "dB", gbw),
+            amber(),
+        )),
+        Line::from(Span::styled(hint.0, hint.1)),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// RF Interference Scanner: microwave / Bluetooth / ACI / DFS detectors with a
+/// confidence bar each + overall RF airspace verdict.
+fn render_rf_scanner(f: &mut Frame, rs: &RenderState, area: Rect) {
+    use crate::core::rf_inference as rf;
+    let tel = &rs.telemetry;
+    let block = titled_block("RF INTERFERENCE SCANNER (non-Wi-Fi)");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let w = inner.width as usize;
+
+    let mw = rf::detect_microwave(tel);
+    let bt = rf::detect_bluetooth(tel);
+    let (aci, _) = rf::detect_aci(tel);
+    let dfs = rf::detect_dfs(tel);
+    let report = rf::run_full(tel);
+
+    let bar_w = w.saturating_sub(26).clamp(6, 24);
+    let conf_bar = move |c: f64| -> String {
+        let filled = (c.clamp(0.0, 1.0) * bar_w as f64).round() as usize;
+        format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled))
+    };
+
+    let rowf = |name: &str, d: &rf::Detection| -> Line<'static> {
+        let pct = (d.confidence * 100.0).round() as i64;
+        let (tag, style) = if d.detected {
+            ("[!]", alert())
+        } else {
+            ("[OK]", good())
+        };
+        Line::from(Span::styled(
+            format!(
+                "{:<10} {} {:>3}% {}",
+                name,
+                conf_bar(d.confidence),
+                pct,
+                tag
+            ),
+            style,
+        ))
+    };
+
+    let mut lines = vec![
+        rowf("Microwave", &mw),
+        rowf("Bluetooth", &bt),
+        rowf("ACI Bleed", &aci),
+        rowf("DFS Radar", &dfs),
+        Line::from(Span::styled(
+            format!("RF AIRSPACE SCORE: {}/100", report.rf_health_score),
+            score_color(report.rf_health_score),
+        )),
+    ];
+    let budget = (inner.height as usize).saturating_sub(lines.len());
+    for (i, wl) in wrap_text(&report.primary_advice, w).into_iter().enumerate() {
+        if i >= budget {
+            break;
+        }
+        lines.push(Line::from(Span::styled(wl, amber())));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// RF Signal Chronograph: tall signal_dbm vertical graph + SNR/retry sparklines
+/// over time — fills the full-width bottom with a real time-series chart.
+fn render_chronograph(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let ss = &rs.socket_sample;
+    let tel = &rs.telemetry;
+    let block = titled_block("RF SIGNAL CHRONOGRAPH (signal · SNR · retry over time)");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 {
+        return;
+    }
+    let w = inner.width as usize;
+    let graph_h = (inner.height as usize).saturating_sub(3).max(2);
+
+    let sig_hist = if ss.signal_history.is_empty() {
+        vec![tel.signal_dbm as f64]
+    } else {
+        ss.signal_history.clone()
+    };
+    let lo = sig_hist
+        .iter()
+        .cloned()
+        .fold(tel.signal_dbm as f64, f64::min);
+    let hi = sig_hist
+        .iter()
+        .cloned()
+        .fold(tel.signal_dbm as f64, f64::max);
+    let drift = (hi - lo).round() as i64;
+
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "SIGNAL {}dBm (range {:.0}..{:.0}, Δ{}dB) · SNR {}dB · Retry {:.1}%",
+            tel.signal_dbm, lo, hi, drift, tel.snr_db, tel.tx_retry_pct
+        ),
+        amber_bold(),
+    ))];
+    for g in render_2d_vertical_graph(&sig_hist, graph_h, w, -90.0, -35.0, "d") {
+        lines.push(Line::from(Span::styled(g, amber())));
+    }
+    let sw = w.saturating_sub(16).max(10);
+    lines.push(Line::from(Span::styled(
+        format!(
+            "SNR   {} {}dB",
+            sparkline(&ss.snr_history, sw, 5.0),
+            tel.snr_db
+        ),
+        good(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "RETRY {} {:.1}%",
+            sparkline(&ss.retry_history, sw, 0.0),
+            tel.tx_retry_pct
+        ),
+        if tel.tx_retry_pct > 8.0 {
+            alert()
+        } else {
+            amber()
+        },
+    )));
     f.render_widget(Paragraph::new(lines), inner);
 }
 
