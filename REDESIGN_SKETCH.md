@@ -223,3 +223,38 @@ NEXT (as you asked): the worker-thread FREEZE FIX — make heavy actions (Doctor
 Boost, LanSweep, toggles…) run off the worker loop like the speedtest already
 does, so navigation never blocks. Starting that now.
 ================================================================================
+
+
+================================================================================
+  ✅ FREEZE FIX  BUILT & PUSHED  (commit f2ebf83)
+================================================================================
+ROOT CAUSE: the worker thread ran heavy engine methods INLINE. Doctor alone is
+~17s of shell work (networksetup/sysctl/curl/ping). While one ran, the worker
+couldn't pull queued navigation keys (↑↓, tab switch) off the channel, so the
+whole TUI looked frozen until it finished. Speedtest was the only thing that
+didn't freeze because it already ran on a background thread.
+
+FIX: every heavy action now dispatches to a background thread (App::spawn_bg)
+that builds throwaway engines from cloned inputs, does the slow work, and pushes
+an ActionOutcome into a shared outbox. The worker drains the outbox each tick and
+merges the results back into App (status line, WAN snapshot, DNS results, LAN
+data, gateway status, and the kernel/zero-lag/sync/cam-pacer flags so the TUNE
+toggles stay truthful). apply_action returns in <1 frame, so you can keep
+navigating — change pages, move the cursor — while a Doctor/Boost/LAN-sweep runs.
+
+Offloaded: Doctor, Boost, Hop2 Repair, Pre-warm, Zombie/Sync, QUIC Fast-Path,
+IPv6 Guard, Fix "!", Safe Renew, MTU Clamp, LAN Sweep, Captive/Gateway, Root
+Auth, WMM/No-Delay/32MB toggles, and every TUNE & FIX row. (RoamRescan stays
+inline — it's one fast refresh tick, not shell I/O.)
+
+VERIFIED: new test `heavy_actions_return_instantly_and_offload` asserts
+apply_action(Doctor) returns <50ms and that navigation applies instantly while it
+runs. 19 tests pass · clippy clean · fmt clean · release builds · no panic on a
+live Doctor + navigation run.
+
+Both requests are now done and pushed:
+  • Power-BI dashboard redesign  (commit 4e6fee3)
+  • UI freeze fix                (commit f2ebf83)
+Run `wifi-rust`, press 4 for TUNE & FIX, run a Doctor, and arrow around while it
+works — it no longer locks up.
+================================================================================
