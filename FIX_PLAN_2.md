@@ -73,3 +73,26 @@ SAFETY / VERIFY
   • cargo clippy · fmt · test · build --release · no-panic run cycling pages +
     pressing M on Overview + a quick speed test · commit · push · show in NVIM.
 ================================================================================
+
+
+================================================================================
+  ✅ ALL FIXES BUILT & PUSHED  (commit 5bd9249)
+================================================================================
+1 ✓ AIRSPACE congestion: clear blocks now show an empty track (spaces), not a
+    dim ░ bar — clear reads as clear. Detected networks → 2-line RSSI cards
+    (name/channel + full-width signal bar + quality word) that fill the tall
+    panel; collapse to 1 line each when crowded + summary footer.
+2 ✓ [M] on OVERVIEW now visibly switches the oscilloscope: LATENCY → DOWNLOAD →
+    UPLOAD → COMBINED. Status line renamed to match. WHAT TO DO NOW gauge
+    re-laid-out (meter on its own line, big digits below, no crowding) and the
+    analysis text wraps to fill the panel's empty bottom.
+3 ✓ PROCESSES: LOAD bar is solid-only (idle rows ≈ empty, hogs stand out);
+    table sized to the real process count; NEW "TOP TALKERS" session-MB bar
+    chart fills the freed space; SELECTED PROCESS + LAN MAP tiles below.
+4 ✓ SPEED TEST: BOTTLENECK INTERPRETATION + WORKLOAD rows word-wrapped — no
+    more "390 Mbps Wi" / "capacity above W" / "stream 4K w" cut-offs; bottom
+    row given more height for the wrapped text.
+
+VERIFIED: clippy clean · fmt clean · 20 tests pass · release builds · no panic
+cycling [M] oscilloscope views + all pages + a quick speed test.
+================================================================================
