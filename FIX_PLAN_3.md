@@ -67,3 +67,26 @@ SAFETY / VERIFY
   • clippy · fmt · test · release · no-panic run (cycle pages + [S]) · commit ·
     push · show in NVIM.
 ================================================================================
+
+
+================================================================================
+  ✅ BUILT & PUSHED  (commit e8f0e42)
+================================================================================
+AIRSPACE is now 5 live panels + KPI strip (was 2 panels with a huge void):
+
+  KPI STRIP │ RF HEALTH · CHANNEL · WIDTH · NEIGHBORS
+  ROW 1     │ SPECTRUM CONGESTION (bars)   │ ★ SWEET-SPOT LOCATOR
+  ROW 2     │ DETECTED NETWORKS (compact)  │ RF INTERFERENCE SCANNER
+  ROW 3     │ RF SIGNAL CHRONOGRAPH (full width time-series)
+
+★ SWEET-SPOT LOCATOR — big score + ■-meter (colour by rating), clicks/s, live
+  Signal & SNR gauges, and a WARMER / COLDER / HOLD hint from the signal trend.
+  [S] still fires the audio scan; the panel is always on.
+RF INTERFERENCE SCANNER — Microwave / Bluetooth / ACI / DFS confidence bars
+  (0-100%) + overall RF airspace score + wrapped advice.
+RF SIGNAL CHRONOGRAPH — tall signal_dbm block graph + SNR & Retry sparklines.
+DETECTED NETWORKS — shrunk to compact one-line RSSI rows (no more oversized void).
+
+VERIFIED: clippy clean · fmt clean · 21 tests pass (1 new: RF confidence bounds)
+· release builds · no panic on the airspace page + [S].
+================================================================================
