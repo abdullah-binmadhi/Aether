@@ -10,10 +10,50 @@ use crate::ui::theme::{alert, amber, amber_bold, bar, good, sparkline};
 use crate::ui::titled_block;
 
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::vertical([Constraint::Min(8), Constraint::Length(7)]).split(area);
     let cols =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
     render_pipe(f, app, cols[0]);
     render_flow(f, app, cols[1]);
+    render_analysis(f, app, rows[1]);
+}
+
+fn render_analysis(f: &mut Frame, app: &App, area: Rect) {
+    let analysis = app.preset.generate_cockpit_analysis(
+        &app.telemetry,
+        app.scope_snap.jitter_ms,
+        app.scope_snap.max_bloat_delta_ms,
+        app.scope_snap.avg_ms,
+        app.scope.cam_pacer_active,
+        &app.spectrum,
+        &app.wan_snap,
+        app.antilag.root_authorized,
+    );
+    let block = titled_block("LIVE RF & WORKLOAD INTERPRETATION");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let mut lines: Vec<Line> = analysis
+        .analysis_lines
+        .iter()
+        .map(|l| {
+            let style = if l.contains("[!]") { alert() } else { amber() };
+            Line::from(Span::styled(l.clone(), style))
+        })
+        .collect();
+    lines.push(Line::from(Span::styled(
+        analysis.recommended_action.clone(),
+        good(),
+    )));
+    let mut badges = Vec::new();
+    for (name, _verdict, ok) in &analysis.workloads {
+        let short: String = name.split_whitespace().next().unwrap_or(name).to_string();
+        badges.push(Span::styled(
+            format!(" {}{} ", if *ok { "✓" } else { "✗" }, short),
+            if *ok { good() } else { alert() },
+        ));
+    }
+    lines.push(Line::from(badges));
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_pipe(f: &mut Frame, app: &App, area: Rect) {

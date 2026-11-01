@@ -1,13 +1,43 @@
 //! Core engines: telemetry model, native collectors, and network diagnostics.
 
+pub mod acoustic_radar;
+pub mod airtime;
+pub mod antilag;
+pub mod bandwidth_shaper;
+pub mod captive;
+pub mod channel_advisor;
+pub mod cmd;
 pub mod collector;
 pub mod corewlan;
+pub mod daemon;
+pub mod disassoc;
+pub mod dns_engine;
+pub mod gateway;
 pub mod health;
+pub mod history;
+pub mod hop2;
 pub mod hops;
+pub mod hotspot;
+pub mod kernel_tuner;
+pub mod lan_scanner;
 pub mod model;
+pub mod orchestrator;
 pub mod ping;
+pub mod pmtu;
+pub mod power_hook;
+pub mod preset_engine;
+pub mod privacy_shield;
 pub mod procmon;
+pub mod profiles;
+pub mod rf_inference;
+pub mod roaming;
+pub mod router_bot;
+pub mod security_guard;
+pub mod socket_matrix;
 pub mod spectrum;
+pub mod speedtest;
+pub mod ticket;
+pub mod wan_doctor;
 
 use std::net::Ipv4Addr;
 use std::time::Duration;

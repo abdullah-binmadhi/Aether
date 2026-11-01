@@ -81,6 +81,11 @@ impl Collector {
                     .unwrap_or_else(|| "Wi-Fi (name hidden)".into());
             }
         }
+        tel.saved_networks = self.saved_networks.clone();
+        // Resolve dual-band siblings by shared prefix (e.g. "Home.5G" / "Home").
+        let (sib5, sib24) = resolve_siblings(&tel.ssid, &self.saved_networks);
+        tel.sibling_5g_ssid = sib5;
+        tel.sibling_24g_ssid = sib24;
 
         // --- Interface / link via netdev (no subprocess) ---
         if let Ok(iface) = netdev::get_default_interface() {
@@ -167,6 +172,36 @@ fn discover_saved_networks(interface: &str) -> Vec<String> {
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty() && l != "<redacted>")
         .collect()
+}
+
+/// Find 5GHz and 2.4GHz sibling SSIDs that share the active network's prefix.
+fn resolve_siblings(active: &str, saved: &[String]) -> (Option<String>, Option<String>) {
+    let base = active
+        .split(['.', '_', '-'])
+        .next()
+        .unwrap_or(active)
+        .trim()
+        .to_lowercase();
+    let mut sib5 = None;
+    let mut sib24 = None;
+    if base.len() >= 3 {
+        for s in saved {
+            if !s.to_lowercase().starts_with(&base) {
+                continue;
+            }
+            let u = s.to_uppercase();
+            let is_5 = (u.contains("5G") || u.contains("6G"))
+                && !u.contains("2.4G")
+                && !u.contains("2.5G");
+            let is_24 = u.contains("2.4") || u.contains("2.5") || u.contains("2G");
+            if is_5 && sib5.is_none() {
+                sib5 = Some(s.clone());
+            } else if is_24 && sib24.is_none() {
+                sib24 = Some(s.clone());
+            }
+        }
+    }
+    (sib5, sib24)
 }
 
 /// True if the awdl0 interface is up+running (AWDL discovery active).

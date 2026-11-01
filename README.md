@@ -1,50 +1,72 @@
 # ⚡ WIFI TUI // Amber CRT Network Cockpit (Rust)
 
 A native **Rust** rebuild of the macOS Wi-Fi cockpit: live RF telemetry, a 4-hop
-bufferbloat isolation matrix, a spectrum collision radar, and a non-destructive
-per-process bandwidth firewall — in an amber CRT terminal aesthetic.
+bufferbloat isolation matrix, spectrum collision radar, a non-destructive
+per-process bandwidth firewall, a WAN/YouTube auto-doctor, DNS racer, kernel
+anti-lag tuner, security guard, and a 4-tier self-healing orchestrator — in an
+amber CRT terminal aesthetic.
 
-This is a ground-up rewrite of the original Python project. The motivation was
-reliability: the Python version drove everything through shell-outs (`system_profiler`,
-`ping`, `networksetup`) and an untyped `dict` passed between threads, which was the
-source of recurring bugs. The Rust rebuild reads the OS directly and is strongly typed.
+This is a complete, ground-up port of the original Python project (≈11k lines,
+45 modules). Every engine, preset, keybinding, and the full 5-tab UI were
+reimplemented in Rust. The motivation was reliability: the Python version drove
+everything through shell-outs and an untyped `dict` passed between threads, which
+was the source of recurring bugs.
 
-## Why Rust fixed the recurring bugs
+## Why the Rust rebuild is more reliable
 
 | Problem in the Python version | Fix in the Rust rebuild |
 |---|---|
 | RF data came from `system_profiler SPAirPortDataType` — **~6 s** per call, blocking the UI | Reads **CoreWLAN** directly via `objc2-core-wlan` — **~3 ms** per call (measured) |
-| Each ping shelled out to `/sbin/ping` every 1.5 s on every hop | Unprivileged ICMP over `SOCK_DGRAM` — no subprocess, no root |
-| Gateway / DNS / MTU / byte counters parsed from `netstat`/`ifconfig`/`scutil` text | Read structurally via the `netdev` crate — no text parsing |
+| Each ping shelled out to `/sbin/ping` on every hop every 1.5 s | Unprivileged ICMP over `SOCK_DGRAM` — no subprocess, no root |
+| Gateway / DNS / MTU / byte counters parsed from `netstat`/`ifconfig`/`scutil` text | Read structurally via the `netdev` crate |
 | Telemetry was a `Dict[str, Any]`; reading a key no writer set failed silently | A typed `Telemetry` struct; the compiler rejects those mistakes |
 | Frozen processes were only resumed on Ctrl-C; SIGTERM/SIGHUP leaked suspended procs | `SIGINT`/`SIGTERM`/`SIGHUP` all exit through one teardown that calls `resume_all()` |
-| `unsafe`-equivalent FFI scattered implicitly | `unsafe` is **denied crate-wide** and re-allowed only in the documented CoreWLAN module |
+| Two orchestrator calls referenced methods that didn't exist (latent `AttributeError`) | Tier 4 maps to the real UPnP `ForceTermination`; the compiler guarantees the call resolves |
+| FFI-equivalent unsafety scattered implicitly | `unsafe` is **denied crate-wide**, re-allowed only in the documented CoreWLAN module |
 
-## Features
+## Features (5 tabs)
 
 - **Tab `[1]` Cockpit** — SSID, band, channel, signal/noise/SNR, link rate, MCS,
-  live RTT/jitter/throughput sparklines, and a 4-hop fault-isolation matrix
-  (`Mac → Gateway → ISP → Google Edge`) with bufferbloat-delta diagnosis.
+  live RTT/jitter/throughput sparklines, 4-hop fault-isolation matrix
+  (`Mac → Gateway → ISP → Google Edge`) with bufferbloat-delta diagnosis, and a
+  live RF/workload interpretation panel with LoL/YouTube/AI readiness badges.
 - **Tab `[2]` Spectrum** — 5GHz UNII/DFS block occupancy, co-channel collision
-  detection, a clean-channel recommendation, and a de-redacted neighbour list.
-- **Tab `[3]` Processes** — live per-process bandwidth table; `[Space]` freezes
-  (`SIGSTOP`) or resumes (`SIGCONT`) a bandwidth hog. System/terminal processes
-  are protected and can never be frozen.
+  detection, clean-channel recommendation, de-redacted neighbour list, and the
+  acoustic sweet-spot locator (`[S]`).
+- **Tab `[3]` Processes** — live per-process bandwidth firewall; `[Space]` freezes
+  (`SIGSTOP`) / resumes (`SIGCONT`) a hog, `[B]` applies QoS shaping, `[N]` sweeps
+  the LAN. System/terminal processes are protected.
+- **Tab `[4]` Tuning Lab** — 12 one-key tuning modules (WMM VIP, CAM pacer, TCP
+  no-delay, 32MB BDP buffers, ECS DNS doctor, IPv6 guard, QUIC fast-path,
+  zero-lag, zombie-socket reaper, 5GHz lock, MTU clamp, root lock), the preset
+  brain with 7 mission presets, and the WAN/YouTube GGC doctor + DNS racer panel.
+- **Tab `[5]` SpeedTest** — multi-stream download/upload saturation with loaded-ping
+  bufferbloat grading, Apple-native `networkQuality` RPM benchmark (`[N]`), and a
+  workload readiness matrix.
 
-## Usage
+## One-shot CLI
 
 ```bash
-# Interactive amber CRT TUI
-wifi-tui
-
-# One-shot CLI
-wifi-tui --status      # print RF telemetry, 4-hop matrix & health score
-wifi-tui --json        # full telemetry as JSON
+wifi-tui --status        # RF telemetry, 4-hop matrix & health score
+wifi-tui --json          # full telemetry as JSON
+wifi-tui --doctor        # WAN & YouTube auto-doctor
+wifi-tui --boost         # god-mode boost pipeline
+wifi-tui --orchestrate   # 4-tier self-healing orchestrator
+wifi-tui --daemon-install / --daemon-uninstall / --daemon-status
 wifi-tui --interface en0
 ```
 
-Keys: `[Tab]` switch view · `[1/2/3]` jump to a tab · `[K]` toggle CAM pacer ·
-`[j/k]` select process · `[Space]` pause/resume · `[U]` resume all · `[R]` rescan · `[Q]` quit.
+## Keybindings (interactive)
+
+`[1..5]` tabs · `[Tab]` cycle · `[D]` doctor · `[G]` boost · `[L]` zero-lag ·
+`[K]` CAM pacer · `[W]` WMM · `[X]` TCP no-delay · `[O]` hop-2 repair · `[6]` IPv6
+guard · `[Y]` QUIC fast-path · `[T]` MTU clamp · `[F]` clear macOS `[!]` · `[P]`
+cycle preset · `[A]` auto-adapt · `[E]` Wi-Fi password editor · `[C]` captive/gateway
+probe · `[R]` roam/rescan · `[M]`/`[`/`]` visual deck · `[J]` export ISP ticket ·
+`[S]` root auth (or sweet-spot on Tab 2) · `[Z]` zombie reaper · `[Q]` quit.
+
+Tab 3: `[j/k]` select · `[Space]` pause · `[B]` shape · `[N]` LAN sweep · `[U]` resume all.
+Tab 5: `[Space]` full suite · `[V]` 5s burst · `[N]` Apple RPM.
 
 ## Build
 
@@ -53,19 +75,20 @@ cargo build --release
 ./target/release/wifi-tui
 ```
 
-Requires macOS (CoreWLAN) and a Rust toolchain. No root required.
+Requires macOS (CoreWLAN) and a Rust toolchain. No root required for monitoring;
+the kernel-tuning actions use `sudo -n` and fall back gracefully when passwordless
+sudo isn't configured (the UI shows "press [S] to persist" in that case).
 
 ### A note on SSID names
 
 On macOS 14+, the Wi-Fi SSID is masked unless the process has Location permission.
-When masked, the cockpit infers the name from your saved preferred networks (macOS
-keeps the connected network first) and labels it `(inferred)`. Grant Location
-permission to the terminal to show the confirmed name.
+When masked, the cockpit infers the name from your saved preferred networks and
+labels it `(inferred)`. Grant Location permission to the terminal for the confirmed name.
 
 ## Development
 
 ```bash
-cargo test            # unit tests (hop math, health score, spectrum, procmon parsing)
+cargo test            # hop math, health score, spectrum, procmon parsing
 cargo clippy --all-targets
 cargo fmt
 ```

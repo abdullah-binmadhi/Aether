@@ -122,6 +122,61 @@ pub struct Telemetry {
 
     // Neighbours.
     pub neighbors: Vec<Neighbor>,
+
+    // --- Enrichment fields populated by the background workers ---
+    // These mirror the Python telemetry dict keys the engines write each tick.
+    pub sibling_5g_ssid: Option<String>,
+    pub sibling_24g_ssid: Option<String>,
+    pub saved_networks: Vec<String>,
+    pub wifi_password: String,
+    pub cam_pacer_active: bool,
+    pub zero_lag_mode: bool,
+
+    // Airtime (airtime.rs).
+    pub tx_retry_pct: f64,
+    pub airtime_load_pct: i64,
+    pub contention_status: String,
+
+    // Roaming (roaming.rs).
+    pub sticky_client: bool,
+    pub roam_verdict: String,
+
+    // Disassoc (disassoc.rs).
+    pub disassoc_summary: String,
+
+    // Hotspot armor (hotspot.rs).
+    pub hotspot_armor_active: bool,
+
+    // Hop 2 repair (hop2.rs).
+    pub hop2_anomaly: bool,
+    pub hop2_diagnosis: String,
+    pub hop2_rtt_ms: f64,
+    pub hop2_bloat_ms: f64,
+    pub hop2_jitter_ms: f64,
+
+    // Channel advisor (channel_advisor.rs).
+    pub channel_advisor_line: String,
+
+    // History scorecard (history.rs).
+    pub history_summary: String,
+
+    // Security (security.rs).
+    pub security_score: i64,
+    pub security_level: String,
+    pub security_threats: Vec<String>,
+
+    // Captive portal (captive.rs).
+    pub captive_portal: bool,
+    pub captive_summary: String,
+
+    // macOS warning badges (collector.rs tick%6).
+    pub macos_weak_security: bool,
+    pub macos_private_mac: bool,
+    pub apple_probe_ok: bool,
+    pub apple_probe_detail: String,
+
+    // Orchestrator tier last executed.
+    pub orchestrator_tier: i64,
 }
 
 impl Default for Telemetry {
@@ -156,6 +211,36 @@ impl Default for Telemetry {
             health_rating: HealthRating::Offline,
             alerts: Vec::new(),
             neighbors: Vec::new(),
+            sibling_5g_ssid: None,
+            sibling_24g_ssid: None,
+            saved_networks: Vec::new(),
+            wifi_password: String::new(),
+            cam_pacer_active: true,
+            zero_lag_mode: false,
+            tx_retry_pct: 0.0,
+            airtime_load_pct: 12,
+            contention_status: "[OK] CLEAR AIRTIME (12% Load │ 0.0% Retries)".into(),
+            sticky_client: false,
+            roam_verdict: "[OK] AP Lock Optimal".into(),
+            disassoc_summary: "[OK] 0 Unplanned Drops (Link Stable)".into(),
+            hotspot_armor_active: false,
+            hop2_anomaly: false,
+            hop2_diagnosis: "Clean".into(),
+            hop2_rtt_ms: 0.0,
+            hop2_bloat_ms: 0.0,
+            hop2_jitter_ms: 0.0,
+            channel_advisor_line: String::new(),
+            history_summary: "Session Drift: 0 Dead-Zone Drops │ Grade A+".into(),
+            security_score: 100,
+            security_level: "CLEAN".into(),
+            security_threats: Vec::new(),
+            captive_portal: false,
+            captive_summary: "[OK] Direct WAN (No Captive Portal)".into(),
+            macos_weak_security: false,
+            macos_private_mac: true,
+            apple_probe_ok: true,
+            apple_probe_detail: String::new(),
+            orchestrator_tier: 0,
         }
     }
 }

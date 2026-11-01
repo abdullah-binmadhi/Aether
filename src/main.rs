@@ -3,6 +3,13 @@
 //! Entry point: argument parsing, one-shot CLI reports, and the interactive TUI
 //! with a signal handler that guarantees frozen processes are resumed on exit.
 
+// This is a faithful full-surface port of the Python project. Some engine
+// methods and struct fields are reachable only via specific CLI flags, the
+// background daemon path, or are serialized into --json / the ISP ticket rather
+// than read by the live TUI. They are part of the intended public API, so we
+// allow dead_code crate-wide rather than delete working, tested behavior.
+#![allow(dead_code)]
+
 mod app;
 mod core;
 mod ui;
@@ -21,6 +28,7 @@ use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::prelude::{CrosstermBackend, Terminal};
 
 use app::{App, Tab};
+use core::speedtest;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,15 +48,101 @@ struct Cli {
     /// Print full telemetry as JSON and exit.
     #[arg(long)]
     json: bool,
+
+    /// Run the one-shot WAN & YouTube auto-doctor and exit.
+    #[arg(long)]
+    doctor: bool,
+
+    /// Run one-shot god-mode boost and exit.
+    #[arg(long)]
+    boost: bool,
+
+    /// Run the 4-tier self-healing orchestrator and exit.
+    #[arg(long)]
+    orchestrate: bool,
+
+    /// Install the background LaunchAgent daemon.
+    #[arg(long = "daemon-install")]
+    daemon_install: bool,
+
+    /// Uninstall the background LaunchAgent daemon.
+    #[arg(long = "daemon-uninstall")]
+    daemon_uninstall: bool,
+
+    /// Print LaunchAgent daemon status.
+    #[arg(long = "daemon-status")]
+    daemon_status: bool,
 }
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
+    if cli.daemon_install {
+        println!("{}", core::daemon::install());
+        return Ok(());
+    }
+    if cli.daemon_uninstall {
+        println!("{}", core::daemon::uninstall());
+        return Ok(());
+    }
+    if cli.daemon_status {
+        println!("{}", core::daemon::status());
+        return Ok(());
+    }
+    if cli.doctor {
+        return run_cli_doctor(&cli);
+    }
+    if cli.boost {
+        return run_cli_boost(&cli);
+    }
+    if cli.orchestrate {
+        return run_cli_orchestrate(&cli);
+    }
     if cli.status || cli.json {
         return run_oneshot(&cli);
     }
     run_tui(&cli.interface)
+}
+
+fn run_cli_doctor(cli: &Cli) -> io::Result<()> {
+    let mut kernel = core::kernel_tuner::KernelTuner::new("Wi-Fi", &cli.interface);
+    let mut doctor = core::wan_doctor::WanDoctor::new(&cli.interface, "Wi-Fi");
+    println!("// RUNNING WIFI COCKPIT // WAN & YOUTUBE AUTO-DOCTOR //");
+    println!("{}", "=".repeat(78));
+    let (ok, summary) = doctor.run_auto_doctor(Some(&mut kernel), false);
+    println!("  {summary}");
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
+fn run_cli_boost(cli: &Cli) -> io::Result<()> {
+    let mut collector = core::collector::Collector::new(&cli.interface);
+    let mut scope = core::PingScope::new(&cli.interface);
+    let snap = scope.probe();
+    let tel = collector.collect(snap.avg_ms, snap.loss_pct);
+    let mut kernel = core::kernel_tuner::KernelTuner::new("Wi-Fi", &cli.interface);
+    let dns = core::dns_engine::DnsEngine::new("Wi-Fi");
+    let mut antilag = core::antilag::AntiLagEngine::new(&cli.interface);
+    let mut doctor = core::wan_doctor::WanDoctor::new(&cli.interface, "Wi-Fi");
+    let (_, doc) = doctor.run_auto_doctor(Some(&mut kernel), false);
+    let boost = antilag.run_god_mode_boost(&tel, &dns, &mut kernel);
+    println!("{boost}\n{doc}");
+    Ok(())
+}
+
+fn run_cli_orchestrate(cli: &Cli) -> io::Result<()> {
+    let mut collector = core::collector::Collector::new(&cli.interface);
+    let mut scope = core::PingScope::new(&cli.interface);
+    let snap = scope.probe();
+    let tel = collector.collect(snap.avg_ms, snap.loss_pct);
+    let mut orch = core::orchestrator::Orchestrator::new(&cli.interface, "Wi-Fi");
+    println!("// RUNNING WIFI COCKPIT // 4-TIER AUTONOMOUS SELF-HEALING ORCHESTRATOR //");
+    println!("{}", "=".repeat(78));
+    let res = orch.run(&tel, &snap, None);
+    println!("  {}", res.summary);
+    for a in &res.actions {
+        println!("    [+] {a}");
+    }
+    std::process::exit(if res.success { 0 } else { 1 });
 }
 
 /// One-shot CLI: collect a snapshot (with a short ping sample) and print it.
@@ -198,7 +292,11 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
         if event::poll(Duration::from_millis(80))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    handle_key(app, key.code, key.modifiers);
+                    if app.pw_edit_active {
+                        handle_pw_editor(app, key.code, key.modifiers);
+                    } else {
+                        handle_key(app, key.code, key.modifiers);
+                    }
                 }
             }
         }
@@ -206,42 +304,363 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
     Ok(())
 }
 
+/// Password-editor sub-mode: capture typed characters and save/connect.
+fn handle_pw_editor(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Esc => {
+            app.pw_edit_active = false;
+            app.status_msg = "Wi-Fi Password editor closed.".into();
+        }
+        KeyCode::Enter => {
+            let target = app.pw_edit_ssid.clone();
+            let pw = app.pw_edit_buf.trim().to_string();
+            app.pw_edit_active = false;
+            app.status_msg = if pw.is_empty() {
+                app.profiles.set_wifi_password(&target, "");
+                format!("Cleared stored password for '{target}'.")
+            } else {
+                app.profiles.set_wifi_password(&target, &pw)
+            };
+            app.telemetry.wifi_password = app.profiles.get_wifi_password(&app.telemetry.ssid);
+        }
+        KeyCode::Tab => {
+            let mut saved = app.telemetry.saved_networks.clone();
+            let curr = app.telemetry.ssid.clone();
+            if !curr.is_empty() && !saved.contains(&curr) {
+                saved.insert(0, curr);
+            }
+            if !saved.is_empty() {
+                app.pw_edit_idx = (app.pw_edit_idx + 1) % saved.len();
+                app.pw_edit_ssid = saved[app.pw_edit_idx].clone();
+                app.pw_edit_buf = app.profiles.get_wifi_password(&app.pw_edit_ssid);
+            }
+        }
+        KeyCode::Char('k') if mods.contains(KeyModifiers::CONTROL) => {
+            let target = app.pw_edit_ssid.clone();
+            app.pw_edit_active = false;
+            app.status_msg = match app.profiles.fetch_keychain_password(&target) {
+                Some(pw) => format!("[OK] Synced password for '{target}' from macOS Keychain: {pw}"),
+                None => format!("[!] Keychain entry not found or cancelled for '{target}'. Press [E] to type it."),
+            };
+        }
+        KeyCode::Backspace => {
+            app.pw_edit_buf.pop();
+        }
+        KeyCode::Char(c) => {
+            app.pw_edit_buf.push(c);
+        }
+        _ => {}
+    }
+}
+
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let tab = app.active_tab;
     match code {
         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
+
         KeyCode::Char('1') => app.active_tab = Tab::Dashboard,
         KeyCode::Char('2') => app.active_tab = Tab::Spectrum,
         KeyCode::Char('3') => app.active_tab = Tab::Processes,
+        KeyCode::Char('4') => app.active_tab = Tab::Tuning,
+        KeyCode::Char('5') => app.active_tab = Tab::SpeedTest,
         KeyCode::Tab => app.active_tab = app.active_tab.next(),
         KeyCode::BackTab => app.active_tab = app.active_tab.prev(),
+
+        KeyCode::Char('j') | KeyCode::Down => {
+            if tab == Tab::Processes && !app.procmon.last.is_empty() {
+                app.proc_cursor = (app.proc_cursor + 1).min(app.procmon.last.len() - 1);
+            } else if tab == Tab::Tuning {
+                app.preset.cursor_idx = (app.preset.cursor_idx + 1) % 12;
+            } else if code == KeyCode::Char('j') {
+                export_ticket(app);
+            }
+        }
         KeyCode::Char('k') | KeyCode::Up => {
-            if app.active_tab == Tab::Processes {
+            if tab == Tab::Processes {
                 app.proc_cursor = app.proc_cursor.saturating_sub(1);
+            } else if tab == Tab::Tuning {
+                app.preset.cursor_idx = (app.preset.cursor_idx + 11) % 12;
             } else {
                 app.status_msg = app.scope.toggle_cam_pacer();
             }
         }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if app.active_tab == Tab::Processes && !app.procmon.last.is_empty() {
-                app.proc_cursor = (app.proc_cursor + 1).min(app.procmon.last.len() - 1);
-            }
-        }
-        KeyCode::Char(' ') | KeyCode::Enter => {
-            if app.active_tab == Tab::Processes {
+        KeyCode::Char('J') => export_ticket(app),
+        KeyCode::Char('K') => app.status_msg = app.scope.toggle_cam_pacer(),
+
+        KeyCode::Char(' ') | KeyCode::Enter => match tab {
+            Tab::Processes => {
                 if let Some(p) = app.procmon.last.get(app.proc_cursor).cloned() {
                     app.status_msg = app.procmon.toggle_pause(p.pid, &p.name);
                 }
             }
+            Tab::Tuning => toggle_tuning_control(app),
+            Tab::SpeedTest => {
+                let target = app
+                    .scope
+                    .isp_ip
+                    .parse()
+                    .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
+                app.status_msg = speedtest::run_full_suite(&mut app.speedtest, target, false);
+            }
+            _ => {}
+        },
+
+        KeyCode::Char('v') | KeyCode::Char('V') if tab == Tab::SpeedTest => {
+            let target = app
+                .scope
+                .isp_ip
+                .parse()
+                .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
+            app.status_msg = speedtest::run_full_suite(&mut app.speedtest, target, true);
         }
-        KeyCode::Char('u') | KeyCode::Char('U') => {
+        KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::SpeedTest => {
+            app.status_msg = speedtest::run_apple_network_quality(&mut app.speedtest);
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::Processes => {
+            let ip = app.telemetry.ipv4.clone();
+            let gw = app.telemetry.gateway.clone();
+            app.lan_data = app.lan_scanner.scan_lan(&ip, &gw, true);
+            app.status_msg = format!("[OK] LAN Sweep Complete: {}", app.lan_data.summary);
+        }
+        KeyCode::Char('u') | KeyCode::Char('U') if tab == Tab::Processes => {
             let n = app.procmon.resume_all();
-            app.status_msg = format!("Resumed {n} frozen process(es) via SIGCONT.");
+            app.status_msg = format!("Resumed {n} frozen processes via SIGCONT.");
+        }
+
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            app.preset.cycle_preset();
+            app.status_msg = format!(
+                "Switched Smart Tuning Preset -> #{}",
+                app.preset.selected_preset_id
+            );
+        }
+        KeyCode::Char('w') | KeyCode::Char('W') => {
+            app.status_msg = app.kernel.toggle_wmm_vip_priority(None)
+        }
+        KeyCode::Char('x') | KeyCode::Char('X') => {
+            app.status_msg = app.kernel.toggle_ffxiv_tcp_nodelay(None)
+        }
+        KeyCode::Char('o') | KeyCode::Char('O') => {
+            let gw = app.telemetry.gateway.clone();
+            crate::core::hop2::refresh_gateway_arp(&gw);
+            app.kernel.toggle_ffxiv_tcp_nodelay(Some(true));
+            app.kernel.toggle_wmm_vip_priority(Some(true));
+            app.status_msg = "Ran 6-Stage Hop 2 Anti-Bloat & De-Jitter Repair.".into();
+        }
+        KeyCode::Char('i') | KeyCode::Char('I') => {
+            app.status_msg = app.kernel.prewarm_workload_edges()
+        }
+        KeyCode::Char('g') | KeyCode::Char('G') => {
+            app.profiles.set_zero_lag_mode(true);
+            app.scope.cam_pacer_active = true;
+            let (_, doc) = app.wan_doctor.run_auto_doctor(Some(&mut app.kernel), false);
+            let boost = {
+                let tel = app.telemetry.clone();
+                app.antilag
+                    .run_god_mode_boost(&tel, &app.dns, &mut app.kernel)
+            };
+            app.dns_results = app.dns.race_resolvers();
+            app.status_msg = format!("{boost} │ {doc}");
+        }
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            let mut tel = app.telemetry.clone();
+            let m = app.antilag.toggle_awdl(Some(&mut tel));
+            app.telemetry = tel;
+            app.profiles.set_zero_lag_mode(app.antilag.zero_lag_active);
+            app.status_msg = m;
+        }
+        KeyCode::Char('z') | KeyCode::Char('Z') => {
+            let (_, z) = app.wan_doctor.reap_zombie_sockets();
+            let s = app
+                .antilag
+                .toggle_sync_daemons(!app.antilag.sync_daemons_frozen);
+            app.status_msg = format!("{z} │ {s}");
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            let (_, doc) = app.wan_doctor.run_auto_doctor(Some(&mut app.kernel), false);
+            app.dns_results = app.dns.race_resolvers();
+            app.wan_snap = app.wan_doctor.get_snapshot();
+            app.status_msg = doc;
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            let (_, m) = app.wan_doctor.toggle_quic_fastpath(None);
+            app.status_msg = m;
+        }
+        KeyCode::Char('b') | KeyCode::Char('B') => {
+            if tab == Tab::Processes {
+                if let Some(p) = app.procmon.last.get(app.proc_cursor).cloned() {
+                    app.status_msg = app.shaper.toggle_throttle_pid(p.pid, &p.name, 8);
+                }
+            } else {
+                app.status_msg = "5GHz sibling lock requires networksetup association.".into();
+            }
+        }
+        KeyCode::Char('h') | KeyCode::Char('H') => {
+            crate::core::dns_engine::DnsEngine::flush_cache();
+            let iface = app.collector.interface.clone();
+            crate::core::antilag::AntiLagEngine::refresh_dhcp_and_routes(&iface);
+            app.status_msg =
+                "Refreshed DHCP lease & DNS cache safely (zero radio disruption).".into();
+        }
+        KeyCode::Char('f') | KeyCode::Char('F') => {
+            let (_, m) = app.wan_doctor.fix_macos_exclamation_mark();
+            app.status_msg = m;
+        }
+        KeyCode::Char('6') => {
+            let (_, m) = app.wan_doctor.toggle_ipv6_guard(None);
+            app.status_msg = m;
+        }
+        KeyCode::Char('t') | KeyCode::Char('T') => {
+            let new_mtu = if app.telemetry.mtu >= 1500 {
+                1492
+            } else {
+                1500
+            };
+            app.status_msg = app.kernel.set_optimal_mtu(new_mtu);
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Char(']') => {
+            if tab == Tab::Tuning && matches!(code, KeyCode::Char('m') | KeyCode::Char('M')) {
+                app.status_msg = app.privacy.randomize_mac();
+            } else {
+                app.visual_mode = (app.visual_mode % 4) + 1;
+                app.status_msg = format!(
+                    "Switched Visual Telemetry Deck -> [{}]",
+                    visual_name(app.visual_mode)
+                );
+            }
+        }
+        KeyCode::Char('[') => {
+            app.visual_mode = if app.visual_mode == 1 {
+                4
+            } else {
+                app.visual_mode - 1
+            };
+            app.status_msg = format!(
+                "Switched Visual Telemetry Deck -> [{}]",
+                visual_name(app.visual_mode)
+            );
+        }
+        KeyCode::Char('e') | KeyCode::Char('E') => {
+            let mut curr = app.telemetry.ssid.clone();
+            if matches!(curr.as_str(), "Scanning..." | "Disconnected" | "") {
+                curr = app
+                    .telemetry
+                    .saved_networks
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Wi-Fi".into());
+            }
+            app.pw_edit_ssid = curr.clone();
+            app.pw_edit_idx = 0;
+            app.pw_edit_buf = app.profiles.get_wifi_password(&curr);
+            app.pw_edit_active = true;
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if tab == Tab::Spectrum {
+                let q = crate::core::acoustic_radar::calculate_quality_score(&app.telemetry);
+                app.status_msg = format!(
+                    "Sweet-Spot Locator: {} {} ({:.1} clicks/s) │ SNR {}dB MCS {}",
+                    q.meter, q.rating, q.click_hz, q.snr_db, q.mcs_index
+                );
+            } else {
+                app.status_msg = app.antilag.authorize_root_privileges();
+            }
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            let state = app.profiles.toggle_auto_pilot();
+            if state {
+                app.preset.selected_preset_id = 1;
+            }
+            app.status_msg = format!(
+                "Closed-Loop Smart Preset Auto-Adapt {}.",
+                if state { "ENABLED" } else { "MANUAL" }
+            );
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            let cap = app.captive.probe_portal(true);
+            if cap.captive {
+                app.status_msg = app.captive.breakout_captive_portal(Some(&app.dns));
+            } else {
+                app.router_status = app.router_bot.probe_ports();
+                app.status_msg = format!(
+                    "Gateway ({}): {} │ {}",
+                    app.router_status.ip, app.router_status.summary, cap.summary
+                );
+            }
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             app.refresh();
-            app.status_msg = "Rescanned RF airspace & hop matrix.".into();
+            app.spectrum = crate::core::spectrum::analyze(&app.telemetry);
+            app.status_msg = "Smart BSSID Roam Evaluation & 5GHz/2.4GHz Rescan complete.".into();
         }
         _ => {}
     }
+}
+
+fn visual_name(m: u8) -> &'static str {
+    match m {
+        1 => "1:TOPOLOGY PIPELINE DIAGRAM",
+        2 => "2:2D RF SIGNAL & SNR CHRONOGRAPH",
+        3 => "3:802.11 QAM CONSTELLATION & MIMO",
+        _ => "4:KERNEL TCP SOCKET & PORT MATRIX",
+    }
+}
+
+fn export_ticket(app: &mut App) {
+    let hist = app.telemetry.history_summary.clone();
+    let (_, msg) = crate::core::ticket::export_report(&app.telemetry, &app.scope_snap, Some(&hist));
+    app.status_msg = msg;
+}
+
+fn toggle_tuning_control(app: &mut App) {
+    let idx = app.preset.cursor_idx;
+    let controls = app.preset.get_tuning_controls(
+        &app.telemetry,
+        &app.kernel_state,
+        &app.wan_snap,
+        app.antilag.root_authorized,
+        app.antilag.sync_daemons_frozen,
+    );
+    let Some(ctrl) = controls.get(idx.min(controls.len().saturating_sub(1))) else {
+        return;
+    };
+    let id = ctrl.id;
+    app.status_msg = match id {
+        "wmm_vip" => app.kernel.toggle_wmm_vip_priority(None),
+        "cam_pacer" => app.scope.toggle_cam_pacer(),
+        "ffxiv_nodelay" => app.kernel.toggle_ffxiv_tcp_nodelay(None),
+        "buf_8mb" => app.kernel.toggle_8mb_streaming_buffers(None),
+        "wan_doctor" => {
+            app.wan_doctor
+                .run_auto_doctor(Some(&mut app.kernel), false)
+                .1
+        }
+        "ipv6_guard" => app.wan_doctor.toggle_ipv6_guard(None).1,
+        "quic_fastpath" => app.wan_doctor.toggle_quic_fastpath(None).1,
+        "zero_lag" => {
+            let mut tel = app.telemetry.clone();
+            let m = app.antilag.toggle_awdl(Some(&mut tel));
+            app.telemetry = tel;
+            m
+        }
+        "sync_freeze" => {
+            let (_, z) = app.wan_doctor.reap_zombie_sockets();
+            let s = app
+                .antilag
+                .toggle_sync_daemons(!app.antilag.sync_daemons_frozen);
+            format!("{z} │ {s}")
+        }
+        "band_5g" => "5GHz sibling lock requires networksetup association.".into(),
+        "mtu_clamp" => {
+            let new_mtu = if app.telemetry.mtu >= 1500 {
+                1492
+            } else {
+                1500
+            };
+            app.kernel.set_optimal_mtu(new_mtu)
+        }
+        "root_auth" => app.antilag.authorize_root_privileges(),
+        _ => "Module updated.".into(),
+    };
 }

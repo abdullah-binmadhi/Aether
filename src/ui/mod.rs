@@ -36,6 +36,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Dashboard => views::dashboard::render(f, app, chunks[1]),
         Tab::Spectrum => views::spectrum::render(f, app, chunks[1]),
         Tab::Processes => views::processes::render(f, app, chunks[1]),
+        Tab::Tuning => views::optimizer::render(f, app, chunks[1]),
+        Tab::SpeedTest => views::speedtest::render(f, app, chunks[1]),
     }
     draw_command_deck(f, app, chunks[2]);
 }
@@ -73,10 +75,10 @@ fn draw_vital_bar(f: &mut Frame, app: &App, area: Rect) {
         } else {
             amber_bold()
         };
-        tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
+        tab_spans.push(Span::styled(format!(" {} ", t.short(area.width)), style));
     }
 
-    let chunks = Layout::horizontal([Constraint::Min(10), Constraint::Length(36)]).split(area);
+    let chunks = Layout::horizontal([Constraint::Min(10), Constraint::Length(58)]).split(area);
     f.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
     f.render_widget(
         Paragraph::new(Line::from(tab_spans)).right_aligned(),
@@ -96,11 +98,13 @@ fn draw_vital_bar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_command_deck(f: &mut Frame, app: &App, area: Rect) {
     let keys = match app.active_tab {
-        Tab::Dashboard => " [Tab] View  [K] CAM Pacer  [R] Rescan  [Q] Quit ",
-        Tab::Spectrum => " [Tab] View  [R] Rescan Airspace  [Q] Quit ",
+        Tab::Dashboard => " [M]Visual [O]Hop2 [D]Doctor [E]WiFi-Key [R]Roam [G]Boost [L]Zero-Lag [J]Ticket [Q]Quit ",
+        Tab::Spectrum => " [E]WiFi-Key [R]Roam [B]Lock-5GHz [S]SweetSpot [C]Gateway [J]Ticket [Q]Quit ",
         Tab::Processes => {
-            " [j/k] Select  [Space] Pause(SIGSTOP)  [U] Resume All  [Tab] View  [Q] Quit "
+            " [j/k]Select [Space]Pause(SIGSTOP) [B]Shape [N]Scan-LAN [U]Resume [Q]Quit "
         }
+        Tab::Tuning => " [j/k]Select [Space]Toggle [D]Doctor [F]Clear-DNS [P]Preset [A]Auto [6]IPv6 [S]Root ",
+        Tab::SpeedTest => " [Space]Full-Suite [V]Quick-5s [N]Apple-RPM [D]Doctor [G]Boost [Q]Quit ",
     };
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
     f.render_widget(
