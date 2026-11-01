@@ -59,3 +59,29 @@ SAFETY / VERIFY
   • clippy · fmt · test · release · no-panic run (open processes page) · commit ·
     push · show in NVIM.
 ================================================================================
+
+
+================================================================================
+  ✅ BUILT & PUSHED  (commit dabfaf3)
+================================================================================
+The firewall table + TOP TALKERS now sit in a ~68% left column; the freed
+right ~32% is a tall NEW panel:
+
+  LIVE CONNECTIONS (KERNEL SOCKETS)
+    ACTIVE SOCKETS: N
+    ESTABLISHED  ███████ 12      ← proportional bars per connection type
+    HTTPS :443   █████    8
+    UDP/QUIC     ████     6
+    DNS 53/853   ██       2
+    TIME_WAIT    █        1
+    SYN/CLOSE_W  ▏        0       (red if stalled)
+    LISTEN / other-port counts
+    VERDICT: [OK]/[!] ...  (wrapped, engine-flagged)
+    → [Z] reap zombie sockets   (shown when draining/stalled)
+
+All from rs.socket_sample.sockets (already sampled each tick). Green when
+clean, red when syn_sent>=4 or close_wait>=8; ties to the existing [Z] action.
+
+VERIFIED: clippy clean · fmt clean · 22 tests pass (1 new) · release builds ·
+no panic on the processes page.
+================================================================================
