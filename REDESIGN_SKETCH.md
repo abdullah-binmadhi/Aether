@@ -192,3 +192,34 @@ BUILD ORDER IF YOU APPROVE
 
 Say "go" to build, or tell me which tiles to swap / drop / add.
 ================================================================================
+
+
+================================================================================
+  ✅ BUILT & PUSHED  (commit 4e6fee3)
+================================================================================
+All 5 pages now render the KPI-strip + tile-grid layout above.
+
+OVERVIEW is fully rebuilt per the sketch:
+  • KPI strip: HEALTH · PING · SIGNAL · LINK RATE (big value + trend spark).
+  • 2x2 grid fills the whole body (no empty lower half):
+      - RF QUALITY           : 5 labelled horizontal gauges, value-graded colour
+      - LATENCY OSCILLOSCOPE : tall multi-row vertical RTT graph + down/up sparks
+      - 4-HOP PATH           : one bar per hop (len ∝ RTT, colour = status)
+      - WHAT TO DO NOW       : arc gauge + WORD-WRAPPED advice (no mid-word cut)
+                               + workload readiness badges
+
+AIRSPACE / PROCESSES / TUNE & FIX / SPEED TEST each gained the KPI strip; the
+Processes page also fills its old dead space with a SELECTED PROCESS detail tile
+and a LAN DEVICE MAP tile.
+
+New reusable, unit-tested primitives: kpi_tile, arc_gauge, hbar_row, grid,
+draw_kpi_strip. Existing chart code (vertical graph, sparkline, bar) reused with
+more height. Zero new data collection — every tile binds to existing data.
+
+Verified: clippy clean · fmt clean · 18 tests pass (4 new) · release builds ·
+no panic on a live run.
+
+NEXT (as you asked): the worker-thread FREEZE FIX — make heavy actions (Doctor,
+Boost, LanSweep, toggles…) run off the worker loop like the speedtest already
+does, so navigation never blocks. Starting that now.
+================================================================================

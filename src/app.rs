@@ -173,6 +173,35 @@ pub struct App {
     last_seen_ssid: String,
     last_seen_gw: String,
     pub stop_flag: Arc<AtomicBool>,
+
+    /// Outbox for results produced by heavy actions running on background
+    /// threads. The worker drains this every tick and merges outcomes into
+    /// `App`, so the worker loop is NEVER blocked by slow shell work and stays
+    /// free to process navigation (CursorUp/Down, SwitchTab) instantly.
+    pub action_outbox: Arc<std::sync::Mutex<Vec<ActionOutcome>>>,
+    /// Number of heavy background actions currently in flight (drives the busy
+    /// spinner without blocking the loop).
+    pub bg_inflight: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// A result produced by a heavy action on a background thread, merged back into
+/// `App` by the worker. Every field is optional: a task sets only what it
+/// computed. `status` always carries the human-readable outcome line.
+#[derive(Default)]
+pub struct ActionOutcome {
+    pub status: String,
+    pub wan_snap: Option<WanSnapshot>,
+    pub dns_results: Option<Vec<DnsResult>>,
+    pub lan_data: Option<LanData>,
+    pub router_status: Option<RouterStatus>,
+    /// Merge-back flags so TUNE-page toggles reflect reality after an offload.
+    pub kernel_wmm: Option<bool>,
+    pub kernel_nodelay: Option<bool>,
+    pub kernel_buffers: Option<bool>,
+    pub zero_lag: Option<bool>,
+    pub sync_frozen: Option<bool>,
+    pub root_authorized: Option<bool>,
+    pub cam_pacer: Option<bool>,
 }
 
 impl App {
@@ -252,6 +281,8 @@ impl App {
             last_seen_ssid: String::new(),
             last_seen_gw: String::new(),
             stop_flag,
+            action_outbox: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            bg_inflight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -414,6 +445,81 @@ impl App {
         std::thread::spawn(move || {
             speedtest::run_apple_network_quality(&shared);
         });
+    }
+
+    /// Run a heavy action's work on a background thread. `job` builds throwaway
+    /// engines from the owned inputs it captured and returns an `ActionOutcome`.
+    /// The worker merges the outcome on a later tick via `drain_outbox`. This is
+    /// what keeps navigation responsive while a slow action runs.
+    fn spawn_bg<F>(&self, job: F)
+    where
+        F: FnOnce() -> ActionOutcome + Send + 'static,
+    {
+        let outbox = std::sync::Arc::clone(&self.action_outbox);
+        let inflight = std::sync::Arc::clone(&self.bg_inflight);
+        inflight.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let outcome = job();
+            if let Ok(mut q) = outbox.lock() {
+                q.push(outcome);
+            }
+            inflight.fetch_sub(1, Ordering::SeqCst);
+        });
+    }
+
+    /// True while any heavy background action is in flight (drives the spinner).
+    pub fn has_bg_inflight(&self) -> bool {
+        self.bg_inflight.load(Ordering::SeqCst) > 0
+    }
+
+    /// Merge any completed background-action outcomes into `App`. Called by the
+    /// worker each tick. Returns true if anything was merged (so the worker can
+    /// republish immediately).
+    pub fn drain_outbox(&mut self) -> bool {
+        let outcomes: Vec<ActionOutcome> = match self.action_outbox.lock() {
+            Ok(mut q) if !q.is_empty() => std::mem::take(&mut *q),
+            _ => return false,
+        };
+        for o in outcomes {
+            if !o.status.is_empty() {
+                self.status_msg = o.status;
+            }
+            if let Some(w) = o.wan_snap {
+                self.wan_snap = w;
+            }
+            if let Some(d) = o.dns_results {
+                self.dns_results = d;
+            }
+            if let Some(l) = o.lan_data {
+                self.lan_data = l;
+            }
+            if let Some(r) = o.router_status {
+                self.router_status = r;
+            }
+            if let Some(v) = o.kernel_wmm {
+                self.kernel.wmm_vip_requested = v;
+            }
+            if let Some(v) = o.kernel_nodelay {
+                self.kernel.ffxiv_nodelay_requested = v;
+            }
+            if let Some(v) = o.kernel_buffers {
+                self.kernel.high_buffers_requested = v;
+            }
+            if let Some(v) = o.zero_lag {
+                self.antilag.zero_lag_active = v;
+                self.profiles.set_zero_lag_mode(v);
+            }
+            if let Some(v) = o.sync_frozen {
+                self.antilag.sync_daemons_frozen = v;
+            }
+            if let Some(v) = o.root_authorized {
+                self.antilag.root_authorized = v;
+            }
+            if let Some(v) = o.cam_pacer {
+                self.scope.cam_pacer_active = v;
+            }
+        }
+        true
     }
 
     /// Build the TUNE & FIX page rows (toggles + one-shot actions) with a
@@ -630,7 +736,7 @@ impl App {
             active_tab: self.active_tab,
             proc_cursor: self.proc_cursor,
             status_msg: self.status_msg.clone(),
-            busy: self.busy || self.is_speedtest_running(),
+            busy: self.busy || self.is_speedtest_running() || self.has_bg_inflight(),
             pw_edit_active: self.pw_edit_active,
             pw_edit_ssid: self.pw_edit_ssid.clone(),
             pw_edit_buf: self.pw_edit_buf.clone(),
@@ -709,8 +815,17 @@ impl App {
             LanSweep => {
                 let ip = self.telemetry.ipv4.clone();
                 let gw = self.telemetry.gateway.clone();
-                self.lan_data = self.lan_scanner.scan_lan(&ip, &gw, true);
-                self.status_msg = format!("[OK] LAN Sweep Complete: {}", self.lan_data.summary);
+                let iface = self.collector.interface.clone();
+                self.status_msg = "Running active LAN sweep…".into();
+                self.spawn_bg(move || {
+                    let mut scanner = LanScanner::new(&iface);
+                    let lan = scanner.scan_lan(&ip, &gw, true);
+                    ActionOutcome {
+                        status: format!("[OK] LAN Sweep Complete: {}", lan.summary),
+                        lan_data: Some(lan),
+                        ..Default::default()
+                    }
+                });
             }
             SpeedFull => {
                 let target = self
@@ -741,30 +856,84 @@ impl App {
                     self.preset.selected_preset_id
                 );
             }
-            ToggleWmm => self.status_msg = self.kernel.toggle_wmm_vip_priority(None),
-            ToggleNoDelay => self.status_msg = self.kernel.toggle_ffxiv_tcp_nodelay(None),
+            ToggleWmm => {
+                let iface = self.collector.interface.clone();
+                let target = !self.kernel.wmm_vip_requested;
+                self.spawn_bg(move || {
+                    let mut kernel = KernelTuner::new("Wi-Fi", &iface);
+                    let status = kernel.toggle_wmm_vip_priority(Some(target));
+                    ActionOutcome {
+                        status,
+                        kernel_wmm: Some(target),
+                        ..Default::default()
+                    }
+                });
+            }
+            ToggleNoDelay => {
+                let iface = self.collector.interface.clone();
+                let target = !self.kernel.ffxiv_nodelay_requested;
+                self.spawn_bg(move || {
+                    let mut kernel = KernelTuner::new("Wi-Fi", &iface);
+                    let status = kernel.toggle_ffxiv_tcp_nodelay(Some(target));
+                    ActionOutcome {
+                        status,
+                        kernel_nodelay: Some(target),
+                        ..Default::default()
+                    }
+                });
+            }
             Hop2Repair => {
                 let gw = self.telemetry.gateway.clone();
-                crate::core::hop2::refresh_gateway_arp(&gw);
-                self.kernel.toggle_ffxiv_tcp_nodelay(Some(true));
-                self.kernel.toggle_wmm_vip_priority(Some(true));
-                self.status_msg = "Ran 6-Stage Hop 2 Anti-Bloat & De-Jitter Repair.".into();
+                let iface = self.collector.interface.clone();
+                self.status_msg = "Running 6-Stage Hop 2 Anti-Bloat Repair…".into();
+                self.spawn_bg(move || {
+                    crate::core::hop2::refresh_gateway_arp(&gw);
+                    let mut kernel = KernelTuner::new("Wi-Fi", &iface);
+                    kernel.toggle_ffxiv_tcp_nodelay(Some(true));
+                    kernel.toggle_wmm_vip_priority(Some(true));
+                    ActionOutcome {
+                        status: "Ran 6-Stage Hop 2 Anti-Bloat & De-Jitter Repair.".into(),
+                        kernel_wmm: Some(true),
+                        kernel_nodelay: Some(true),
+                        ..Default::default()
+                    }
+                });
             }
-            Prewarm => self.status_msg = self.kernel.prewarm_workload_edges(),
+            Prewarm => {
+                let iface = self.collector.interface.clone();
+                self.status_msg = "Pre-warming CDN/AI/gaming edges…".into();
+                self.spawn_bg(move || {
+                    let mut kernel = KernelTuner::new("Wi-Fi", &iface);
+                    ActionOutcome {
+                        status: kernel.prewarm_workload_edges(),
+                        ..Default::default()
+                    }
+                });
+            }
             Boost => {
-                self.profiles.set_zero_lag_mode(true);
-                self.scope.cam_pacer_active = true;
-                let (_, doc) = self
-                    .wan_doctor
-                    .run_auto_doctor(Some(&mut self.kernel), false);
-                let boost = {
-                    let tel = self.telemetry.clone();
-                    self.antilag
-                        .run_god_mode_boost(&tel, &self.dns, &mut self.kernel)
-                };
-                self.dns_results = self.dns.race_resolvers();
-                self.wan_snap = self.wan_doctor.get_snapshot();
-                self.status_msg = format!("{boost} │ {doc}");
+                let iface = self.collector.interface.clone();
+                let tel = self.telemetry.clone();
+                self.status_msg = "Running God-Mode Boost…".into();
+                self.spawn_bg(move || {
+                    let mut kernel = KernelTuner::new("Wi-Fi", &iface);
+                    let mut doctor = WanDoctor::new(&iface, "Wi-Fi");
+                    let mut antilag = AntiLagEngine::new(&iface);
+                    let mut dns = DnsEngine::new("Wi-Fi");
+                    let (_, doc) = doctor.run_auto_doctor(Some(&mut kernel), false);
+                    let boost = antilag.run_god_mode_boost(&tel, &dns, &mut kernel);
+                    let dns_results = dns.race_resolvers();
+                    ActionOutcome {
+                        status: format!("{boost} │ {doc}"),
+                        wan_snap: Some(doctor.get_snapshot()),
+                        dns_results: Some(dns_results),
+                        kernel_wmm: Some(kernel.wmm_vip_requested),
+                        kernel_nodelay: Some(kernel.ffxiv_nodelay_requested),
+                        zero_lag: Some(true),
+                        sync_frozen: Some(antilag.sync_daemons_frozen),
+                        cam_pacer: Some(true),
+                        ..Default::default()
+                    }
+                });
             }
             ZeroLag => {
                 let mut tel = self.telemetry.clone();
@@ -775,24 +944,51 @@ impl App {
                 self.status_msg = m;
             }
             ZombieSync => {
-                let (_, z) = self.wan_doctor.reap_zombie_sockets();
-                let s = self
-                    .antilag
-                    .toggle_sync_daemons(!self.antilag.sync_daemons_frozen);
-                self.status_msg = format!("{z} │ {s}");
+                let iface = self.collector.interface.clone();
+                let target_freeze = !self.antilag.sync_daemons_frozen;
+                self.status_msg = "Reaping zombie sockets & toggling sync freeze…".into();
+                self.spawn_bg(move || {
+                    let mut doctor = WanDoctor::new(&iface, "Wi-Fi");
+                    let mut antilag = AntiLagEngine::new(&iface);
+                    let (_, z) = doctor.reap_zombie_sockets();
+                    let s = antilag.toggle_sync_daemons(target_freeze);
+                    ActionOutcome {
+                        status: format!("{z} │ {s}"),
+                        wan_snap: Some(doctor.get_snapshot()),
+                        sync_frozen: Some(antilag.sync_daemons_frozen),
+                        ..Default::default()
+                    }
+                });
             }
             Doctor => {
-                let (_, doc) = self
-                    .wan_doctor
-                    .run_auto_doctor(Some(&mut self.kernel), false);
-                self.dns_results = self.dns.race_resolvers();
-                self.wan_snap = self.wan_doctor.get_snapshot();
-                self.status_msg = doc;
+                let iface = self.collector.interface.clone();
+                self.status_msg = "Running WAN & YouTube Doctor…".into();
+                self.spawn_bg(move || {
+                    let mut kernel = KernelTuner::new("Wi-Fi", &iface);
+                    let mut doctor = WanDoctor::new(&iface, "Wi-Fi");
+                    let (_, doc) = doctor.run_auto_doctor(Some(&mut kernel), false);
+                    let mut dns = DnsEngine::new("Wi-Fi");
+                    let dns_results = dns.race_resolvers();
+                    ActionOutcome {
+                        status: doc,
+                        wan_snap: Some(doctor.get_snapshot()),
+                        dns_results: Some(dns_results),
+                        ..Default::default()
+                    }
+                });
             }
             QuicFastpath => {
-                let (_, m) = self.wan_doctor.toggle_quic_fastpath(None);
-                self.wan_snap = self.wan_doctor.get_snapshot();
-                self.status_msg = m;
+                let iface = self.collector.interface.clone();
+                self.status_msg = "Toggling QUIC → HTTP/2 fast-path…".into();
+                self.spawn_bg(move || {
+                    let mut doctor = WanDoctor::new(&iface, "Wi-Fi");
+                    let (_, m) = doctor.toggle_quic_fastpath(None);
+                    ActionOutcome {
+                        status: m,
+                        wan_snap: Some(doctor.get_snapshot()),
+                        ..Default::default()
+                    }
+                });
             }
             Shape => {
                 if tab == Tab::Processes {
@@ -804,28 +1000,59 @@ impl App {
                 }
             }
             SafeRenew => {
-                crate::core::dns_engine::DnsEngine::flush_cache();
                 let iface = self.collector.interface.clone();
-                crate::core::antilag::AntiLagEngine::refresh_dhcp_and_routes(&iface);
-                self.status_msg =
-                    "Refreshed DHCP lease & DNS cache safely (zero radio disruption).".into();
+                self.status_msg = "Refreshing DHCP lease & DNS cache…".into();
+                self.spawn_bg(move || {
+                    crate::core::dns_engine::DnsEngine::flush_cache();
+                    crate::core::antilag::AntiLagEngine::refresh_dhcp_and_routes(&iface);
+                    ActionOutcome {
+                        status: "Refreshed DHCP lease & DNS cache safely (zero radio disruption)."
+                            .into(),
+                        ..Default::default()
+                    }
+                });
             }
             FixExclamation => {
-                let (_, m) = self.wan_doctor.fix_macos_exclamation_mark();
-                self.status_msg = m;
+                let iface = self.collector.interface.clone();
+                self.status_msg = "Fixing macOS \"!\" mark…".into();
+                self.spawn_bg(move || {
+                    let mut doctor = WanDoctor::new(&iface, "Wi-Fi");
+                    let (_, m) = doctor.fix_macos_exclamation_mark();
+                    ActionOutcome {
+                        status: m,
+                        wan_snap: Some(doctor.get_snapshot()),
+                        ..Default::default()
+                    }
+                });
             }
             Ipv6Guard => {
-                let (_, m) = self.wan_doctor.toggle_ipv6_guard(None);
-                self.wan_snap = self.wan_doctor.get_snapshot();
-                self.status_msg = m;
+                let iface = self.collector.interface.clone();
+                self.status_msg = "Toggling IPv6 link-local guard…".into();
+                self.spawn_bg(move || {
+                    let mut doctor = WanDoctor::new(&iface, "Wi-Fi");
+                    let (_, m) = doctor.toggle_ipv6_guard(None);
+                    ActionOutcome {
+                        status: m,
+                        wan_snap: Some(doctor.get_snapshot()),
+                        ..Default::default()
+                    }
+                });
             }
             MtuClamp => {
+                let iface = self.collector.interface.clone();
                 let new_mtu = if self.telemetry.mtu >= 1500 {
                     1492
                 } else {
                     1500
                 };
-                self.status_msg = self.kernel.set_optimal_mtu(new_mtu);
+                self.status_msg = format!("Clamping MTU to {new_mtu}…");
+                self.spawn_bg(move || {
+                    let kernel = KernelTuner::new("Wi-Fi", &iface);
+                    ActionOutcome {
+                        status: kernel.set_optimal_mtu(new_mtu),
+                        ..Default::default()
+                    }
+                });
             }
             MacPrivacy => self.status_msg = self.privacy.randomize_mac(),
             SweetSpot => {
@@ -835,7 +1062,19 @@ impl App {
                     q.meter, q.rating, q.click_hz, q.snr_db, q.mcs_index
                 );
             }
-            RootAuth => self.status_msg = self.antilag.authorize_root_privileges(),
+            RootAuth => {
+                let iface = self.collector.interface.clone();
+                self.status_msg = "Requesting root authorization (GUI prompt)…".into();
+                self.spawn_bg(move || {
+                    let mut antilag = AntiLagEngine::new(&iface);
+                    let status = antilag.authorize_root_privileges();
+                    ActionOutcome {
+                        status,
+                        root_authorized: Some(antilag.root_authorized),
+                        ..Default::default()
+                    }
+                });
+            }
             AutoPilot => {
                 let state = self.profiles.toggle_auto_pilot();
                 if state {
@@ -847,18 +1086,34 @@ impl App {
                 );
             }
             CaptiveGateway => {
-                let cap = self.captive.probe_portal(true);
-                if cap.captive {
-                    self.status_msg = self.captive.breakout_captive_portal(Some(&self.dns));
-                } else {
-                    self.router_status = self.router_bot.probe_ports();
-                    self.status_msg = format!(
-                        "Gateway ({}): {} │ {}",
-                        self.router_status.ip, self.router_status.summary, cap.summary
-                    );
-                }
+                let gw_ip = self.telemetry.gateway.clone();
+                self.status_msg = "Probing captive portal & gateway…".into();
+                self.spawn_bg(move || {
+                    let mut captive = CaptivePortalEngine::new("Wi-Fi");
+                    let cap = captive.probe_portal(true);
+                    if cap.captive {
+                        let dns = DnsEngine::new("Wi-Fi");
+                        ActionOutcome {
+                            status: captive.breakout_captive_portal(Some(&dns)),
+                            ..Default::default()
+                        }
+                    } else {
+                        let router_bot = RouterBot::new(&gw_ip);
+                        let rs = router_bot.probe_ports();
+                        let status =
+                            format!("Gateway ({}): {} │ {}", rs.ip, rs.summary, cap.summary);
+                        ActionOutcome {
+                            status,
+                            router_status: Some(rs),
+                            ..Default::default()
+                        }
+                    }
+                });
             }
             RoamRescan => {
+                // A full refresh touches most engines; run it inline on the
+                // worker (it's a single fast refresh tick, not a 17s shell job),
+                // but it still returns quickly so navigation isn't blocked long.
                 self.refresh();
                 self.spectrum = crate::core::spectrum::analyze(&self.telemetry);
                 self.status_msg =
@@ -907,7 +1162,17 @@ impl App {
                 }
             }
             PaletteToggleBuffers => {
-                self.status_msg = self.kernel.toggle_8mb_streaming_buffers(None);
+                let iface = self.collector.interface.clone();
+                let target = !self.kernel.high_buffers_requested;
+                self.spawn_bg(move || {
+                    let mut kernel = KernelTuner::new("Wi-Fi", &iface);
+                    let status = kernel.toggle_8mb_streaming_buffers(Some(target));
+                    ActionOutcome {
+                        status,
+                        kernel_buffers: Some(target),
+                        ..Default::default()
+                    }
+                });
             }
             // Password editor.
             PwOpen => {
@@ -995,76 +1260,28 @@ impl App {
         let Some(row) = rows.get(self.tune_cursor) else {
             return;
         };
-        // Dispatch by the plain-English label (stable identifiers).
-        self.status_msg = match row.label.as_str() {
-            "Zero-Lag Mode" => {
-                let mut tel = self.telemetry.clone();
-                let m = self.antilag.toggle_awdl(Some(&mut tel));
-                self.telemetry = tel;
-                self.profiles
-                    .set_zero_lag_mode(self.antilag.zero_lag_active);
-                m
-            }
-            "WMM VIP Airtime Priority" => self.kernel.toggle_wmm_vip_priority(None),
-            "25Hz CAM Anti-Sleep Pacer" => self.scope.toggle_cam_pacer(),
-            "Gaming TCP No-Delay" => self.kernel.toggle_ffxiv_tcp_nodelay(None),
-            "32MB High-BDP Buffers" => self.kernel.toggle_8mb_streaming_buffers(None),
-            "IPv6 Link-Local Guard" => {
-                let r = self.wan_doctor.toggle_ipv6_guard(None).1;
-                self.wan_snap = self.wan_doctor.get_snapshot();
-                r
-            }
-            "QUIC → HTTP/2 Fast-Path" => {
-                let r = self.wan_doctor.toggle_quic_fastpath(None).1;
-                self.wan_snap = self.wan_doctor.get_snapshot();
-                r
-            }
-            "Sync Daemon Freezer" => {
-                let (_, z) = self.wan_doctor.reap_zombie_sockets();
-                let s = self
-                    .antilag
-                    .toggle_sync_daemons(!self.antilag.sync_daemons_frozen);
-                format!("{z} │ {s}")
-            }
-            "Fiber/PPPoE MTU Clamp" => {
-                let new_mtu = if self.telemetry.mtu >= 1500 {
-                    1492
-                } else {
-                    1500
-                };
-                self.kernel.set_optimal_mtu(new_mtu)
-            }
-            "God-Mode Boost" => {
-                self.profiles.set_zero_lag_mode(true);
-                self.scope.cam_pacer_active = true;
-                let (_, doc) = self
-                    .wan_doctor
-                    .run_auto_doctor(Some(&mut self.kernel), false);
-                let boost = {
-                    let tel = self.telemetry.clone();
-                    self.antilag
-                        .run_god_mode_boost(&tel, &self.dns, &mut self.kernel)
-                };
-                self.dns_results = self.dns.race_resolvers();
-                self.wan_snap = self.wan_doctor.get_snapshot();
-                format!("{boost} │ {doc}")
-            }
-            "WAN & YouTube Doctor" => {
-                let (_, doc) = self
-                    .wan_doctor
-                    .run_auto_doctor(Some(&mut self.kernel), false);
-                self.dns_results = self.dns.race_resolvers();
-                self.wan_snap = self.wan_doctor.get_snapshot();
-                doc
-            }
-            "Fix macOS \"!\" Mark" => self.wan_doctor.fix_macos_exclamation_mark().1,
-            "Root Authorization" => self.antilag.authorize_root_privileges(),
-            "Export Diagnostic Ticket" => {
-                let hist = self.telemetry.history_summary.clone();
-                crate::core::ticket::export_report(&self.telemetry, &self.scope_snap, Some(&hist)).1
-            }
-            _ => "Module updated.".into(),
-        };
+        // Dispatch each row to its (now background-offloaded) Action so the
+        // TUNE page never blocks the worker loop either. Light, instant toggles
+        // (AWDL mute, CAM pacer) run inline; everything that shells out is
+        // routed through apply_action -> spawn_bg.
+        let label = row.label.clone();
+        match label.as_str() {
+            "Zero-Lag Mode" => self.apply_action(Action::ZeroLag),
+            "WMM VIP Airtime Priority" => self.apply_action(Action::ToggleWmm),
+            "25Hz CAM Anti-Sleep Pacer" => self.apply_action(Action::CamPacer),
+            "Gaming TCP No-Delay" => self.apply_action(Action::ToggleNoDelay),
+            "32MB High-BDP Buffers" => self.apply_action(Action::PaletteToggleBuffers),
+            "IPv6 Link-Local Guard" => self.apply_action(Action::Ipv6Guard),
+            "QUIC → HTTP/2 Fast-Path" => self.apply_action(Action::QuicFastpath),
+            "Sync Daemon Freezer" => self.apply_action(Action::ZombieSync),
+            "Fiber/PPPoE MTU Clamp" => self.apply_action(Action::MtuClamp),
+            "God-Mode Boost" => self.apply_action(Action::Boost),
+            "WAN & YouTube Doctor" => self.apply_action(Action::Doctor),
+            "Fix macOS \"!\" Mark" => self.apply_action(Action::FixExclamation),
+            "Root Authorization" => self.apply_action(Action::RootAuth),
+            "Export Diagnostic Ticket" => self.apply_action(Action::ExportTicket),
+            _ => self.status_msg = "Module updated.".into(),
+        }
     }
 
     fn toggle_tuning_control(&mut self) {
@@ -1304,5 +1521,35 @@ mod perf_tests {
         let per = t.elapsed().as_secs_f64() * 1000.0 / 200.0;
         // Each render-snapshot build must be far under a 16ms frame.
         assert!(per < 5.0, "build_render too slow: {per:.2} ms/call");
+    }
+
+    #[test]
+    fn heavy_actions_return_instantly_and_offload() {
+        // The whole point of the freeze fix: a heavy action must dispatch to a
+        // background thread and RETURN immediately, leaving the worker loop free
+        // to process navigation. We call Doctor (normally ~17s of shell work)
+        // and assert apply_action itself returns in well under a frame, and that
+        // it registered an in-flight background task.
+        let mut app = App::new("en0", Arc::new(AtomicBool::new(false)));
+        let t = std::time::Instant::now();
+        app.apply_action(Action::Doctor);
+        let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            elapsed_ms < 50.0,
+            "apply_action(Doctor) blocked for {elapsed_ms:.1}ms — it must offload, not run inline"
+        );
+        assert!(
+            app.has_bg_inflight(),
+            "Doctor should have spawned a background task"
+        );
+
+        // Navigation actions issued while the Doctor runs must apply instantly
+        // and NOT wait for the background task.
+        let t2 = std::time::Instant::now();
+        app.apply_action(Action::SwitchTab(Tab::Spectrum));
+        app.apply_action(Action::SwitchTab(Tab::Processes));
+        let nav_ms = t2.elapsed().as_secs_f64() * 1000.0;
+        assert!(nav_ms < 20.0, "navigation blocked for {nav_ms:.1}ms");
+        assert_eq!(app.active_tab, Tab::Processes);
     }
 }

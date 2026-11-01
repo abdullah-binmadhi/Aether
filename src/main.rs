@@ -530,22 +530,20 @@ fn run_tui(interface: &str) -> io::Result<()> {
     // but we need its first render snapshot to seed the UI. Construct it inside
     // the worker and hand back the initial snapshot via the shared mutex.
     let shared: Arc<Mutex<Option<RenderState>>> = Arc::new(Mutex::new(None));
-    let busy = Arc::new(AtomicBool::new(false));
     let worker_quit = Arc::new(AtomicBool::new(false));
     let (tx, rx): (Sender<Action>, Receiver<Action>) = mpsc::channel();
 
     let worker = {
         let shared = Arc::clone(&shared);
-        let busy = Arc::clone(&busy);
         let worker_quit = Arc::clone(&worker_quit);
         let stop = Arc::clone(&stop);
         let iface = interface.to_string();
-        std::thread::spawn(move || worker_loop(&iface, shared, busy, worker_quit, stop, rx))
+        std::thread::spawn(move || worker_loop(&iface, shared, worker_quit, stop, rx))
     };
 
     // Wait briefly for the worker to publish its first snapshot.
     let mut terminal = setup_terminal()?;
-    let res = ui_loop(&mut terminal, &shared, &busy, &tx, &worker_quit, &stop);
+    let res = ui_loop(&mut terminal, &shared, &tx, &worker_quit, &stop);
 
     // Tell the worker to finish and clean up (resume frozen processes).
     worker_quit.store(true, Ordering::SeqCst);
@@ -564,7 +562,6 @@ fn run_tui(interface: &str) -> io::Result<()> {
 fn worker_loop(
     interface: &str,
     shared: Arc<Mutex<Option<RenderState>>>,
-    busy: Arc<AtomicBool>,
     worker_quit: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     rx: Receiver<Action>,
@@ -581,39 +578,25 @@ fn worker_loop(
             break;
         }
 
-        // Drain any pending actions (each may block; that's fine off the UI thread).
-        // While a background speedtest runs, poll fast so live progress is
-        // republished ~10x/sec and the UI animates.
-        let poll = if app.is_speedtest_running() {
-            Duration::from_millis(100)
+        // Poll fast while any background work (speedtest or a heavy action) is
+        // in flight so live progress / completion is republished promptly.
+        let poll = if app.is_speedtest_running() || app.has_bg_inflight() {
+            Duration::from_millis(80)
         } else {
             Duration::from_millis(120)
         };
         match rx.recv_timeout(poll) {
             Ok(action) => {
-                let heavy = is_heavy(&action);
-                if heavy {
-                    busy.store(true, Ordering::SeqCst);
-                    publish(&shared, &app); // show the spinner immediately
-                }
+                // Every action now returns instantly: heavy work is dispatched
+                // to a background thread via spawn_bg, so the worker loop is
+                // never blocked and stays free to process navigation.
                 app.apply_action(action);
-                if heavy {
-                    busy.store(false, Ordering::SeqCst);
-                }
                 publish(&shared, &app);
-                // Drain the rest without blocking.
+                // Drain the rest of the queue without blocking.
                 loop {
                     match rx.try_recv() {
                         Ok(a) => {
-                            let h = is_heavy(&a);
-                            if h {
-                                busy.store(true, Ordering::SeqCst);
-                                publish(&shared, &app);
-                            }
                             app.apply_action(a);
-                            if h {
-                                busy.store(false, Ordering::SeqCst);
-                            }
                             publish(&shared, &app);
                         }
                         Err(TryRecvError::Empty) => break,
@@ -625,7 +608,11 @@ fn worker_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        // Periodic background refresh.
+        // Merge any completed background-action outcomes and republish.
+        if app.drain_outbox() {
+            publish(&shared, &app);
+        }
+
         // While a speedtest runs on its background thread, republish each cycle
         // so the growing bars, climbing numbers and scrolling scope animate.
         if app.is_speedtest_running() {
@@ -643,32 +630,6 @@ fn worker_loop(
     let _ = app.procmon.resume_all();
 }
 
-/// Heavy actions get a spinner and an immediate pre-publish; light UI-only ones
-/// (tab switch, cursor move, visual deck) do not.
-fn is_heavy(a: &Action) -> bool {
-    use Action::*;
-    matches!(
-        a,
-        Doctor
-            | Boost
-            | Hop2Repair
-            | Prewarm
-            | ZombieSync
-            | QuicFastpath
-            | Ipv6Guard
-            | FixExclamation
-            | SafeRenew
-            | LanSweep
-            | CaptiveGateway
-            | RoamRescan
-            | RootAuth
-            | MtuClamp
-            | Confirm
-            | PwKeychain
-            | PwSave
-    )
-}
-
 fn publish(shared: &Arc<Mutex<Option<RenderState>>>, app: &App) {
     if let Ok(mut guard) = shared.lock() {
         *guard = Some(app.build_render());
@@ -679,7 +640,6 @@ fn publish(shared: &Arc<Mutex<Option<RenderState>>>, app: &App) {
 fn ui_loop(
     terminal: &mut Tui,
     shared: &Arc<Mutex<Option<RenderState>>>,
-    busy: &Arc<AtomicBool>,
     tx: &Sender<Action>,
     worker_quit: &Arc<AtomicBool>,
     stop: &Arc<AtomicBool>,
@@ -691,10 +651,11 @@ fn ui_loop(
             break;
         }
 
-        // Draw the latest published snapshot (if any yet).
+        // Draw the latest published snapshot (if any yet). The snapshot's own
+        // `busy` flag (set from App::has_bg_inflight / speedtest) drives the
+        // spinner — the UI thread never computes it.
         let snap = shared.lock().ok().and_then(|g| g.clone());
-        if let Some(mut rs) = snap {
-            rs.busy = busy.load(Ordering::Relaxed);
+        if let Some(rs) = snap {
             spin = spin.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &rs, spin))?;
 
