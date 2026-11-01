@@ -159,6 +159,10 @@ pub struct App {
     pub tick: u64,
     pub busy: bool,
 
+    /// Automatic, anti-cheat-safe Game Mode (detects games, applies safe tweaks,
+    /// hard-blocks risky mutations, reverts on exit — all with zero user input).
+    pub game_mode: crate::core::game_mode::GameMode,
+
     // Password editor sub-mode.
     pub pw_edit_active: bool,
     pub pw_edit_ssid: String,
@@ -271,6 +275,7 @@ impl App {
             should_quit: false,
             tick: 0,
             busy: false,
+            game_mode: crate::core::game_mode::GameMode::default(),
             pw_edit_active: false,
             pw_edit_ssid: String::new(),
             pw_edit_buf: String::new(),
@@ -318,6 +323,54 @@ impl App {
             } else {
                 self.proc_cursor.min(n - 1)
             };
+        }
+
+        // Automatic Game Mode: detect on a light cadence (pgrep is cheap but we
+        // don't need it every tick), apply safe tweaks on entry, revert on exit.
+        if self.tick.is_multiple_of(3) {
+            self.game_mode_tick();
+        }
+    }
+
+    /// Detect whether a game/anti-cheat is running and drive the Game Mode state
+    /// machine with zero user input: on entry apply the anti-cheat-SAFE set and
+    /// revert any risky kernel tweaks to macOS defaults; on exit restore them.
+    fn game_mode_tick(&mut self) {
+        use crate::core::game_mode;
+        let detected = game_mode::detect_game();
+        match (self.game_mode.active(), detected) {
+            (false, Some(game)) => {
+                // Entering a game: revert any risky kernel tweaks to clean
+                // defaults FIRST (so the game never runs on tampered settings),
+                // then apply the safe set.
+                self.revert_risky_to_defaults();
+                let iface = self.collector.interface.clone();
+                let msg = game_mode::enter(&mut self.game_mode, &iface, game);
+                self.status_msg = msg;
+            }
+            (true, None) => {
+                // Game closed: restore safe tweaks (AirDrop, MTU snapshot).
+                let iface = self.collector.interface.clone();
+                let msg = game_mode::exit(&mut self.game_mode, &iface);
+                self.status_msg = msg;
+            }
+            _ => {}
+        }
+    }
+
+    /// Push the risky kernel/network knobs back to macOS defaults. Called on
+    /// Game Mode entry so a game never runs on anti-cheat-risky tampered state,
+    /// and reusable as a manual "restore defaults". Only writes if sudo is
+    /// available (the toggles no-op otherwise); never freezes a process.
+    fn revert_risky_to_defaults(&mut self) {
+        // delayed_ack=3 / rexmt_slop=200, buffers+mss defaults, WMM off.
+        self.kernel.toggle_ffxiv_tcp_nodelay(Some(false));
+        self.kernel.toggle_8mb_streaming_buffers(Some(false));
+        self.kernel.toggle_wmm_vip_priority(Some(false));
+        // Unfreeze any processes/daemons we may have paused earlier.
+        let _ = self.procmon.resume_all();
+        if self.antilag.sync_daemons_frozen {
+            self.antilag.toggle_sync_daemons(false);
         }
     }
 
@@ -418,6 +471,8 @@ impl App {
     }
 
     pub fn teardown(&mut self) {
+        // Restore AirDrop etc. if Game Mode was active, and unfreeze processes.
+        crate::core::game_mode::force_restore(&mut self.game_mode);
         let resumed = self.procmon.resume_all();
         if resumed > 0 {
             self.status_msg = format!("Resumed {resumed} frozen process(es) on exit.");
@@ -750,6 +805,26 @@ impl App {
                     .map(|i| (cat[i].0.to_string(), cat[i].1.to_string()))
                     .collect()
             },
+            game_mode_active: self.game_mode.active(),
+            game_name: self.game_mode.game_name().to_string(),
+        }
+    }
+
+    /// True if `action` performs an anti-cheat-risky mutation that must be
+    /// blocked while a game is running. Navigation, palette, password editing,
+    /// speed tests and read-only actions are allowed.
+    fn is_risky_in_game(action: &Action, tab: Tab) -> bool {
+        use Action::*;
+        match action {
+            // Kernel sysctl writes, link/MTU changes, process freezing, root.
+            Boost | Doctor | Hop2Repair | ZombieSync | QuicFastpath | Ipv6Guard
+            | FixExclamation | SafeRenew | MtuClamp | RootAuth | ToggleWmm | ToggleNoDelay
+            | PaletteToggleBuffers | Prewarm | ZeroLag | CamPacer | AutoPilot | Shape
+            | CaptiveGateway | RoamRescan => true,
+            // Confirm freezes a process (SIGSTOP) only on the Processes tab; and
+            // runs the risky tune rows on the Tuning tab.
+            Confirm => matches!(tab, Tab::Processes | Tab::Tuning),
+            _ => false,
         }
     }
 
@@ -757,6 +832,19 @@ impl App {
     pub fn apply_action(&mut self, action: Action) {
         use Action::*;
         let tab = self.active_tab;
+
+        // Game Mode guard: while a game/anti-cheat is running, hard-block every
+        // risky mutation (kernel sysctl writes, SIGSTOP, MTU, boost/doctor/root)
+        // so nothing wifi-tui does can trip a kernel anti-cheat like Vanguard.
+        if self.game_mode.active() && Self::is_risky_in_game(&action, tab) {
+            self.status_msg = format!(
+                "🎮 GAME MODE — '{}' blocked (anti-cheat safe). Risky tweaks are disabled while {} runs.",
+                risky_action_label(&action),
+                self.game_mode.game_name()
+            );
+            return;
+        }
+
         match action {
             Quit => self.should_quit = true,
             SwitchTab(t) => self.active_tab = t,
@@ -1451,6 +1539,35 @@ fn oscilloscope_name(m: u8) -> &'static str {
     }
 }
 
+/// Short human label for a risky action, used in the Game Mode block notice.
+fn risky_action_label(action: &Action) -> &'static str {
+    use Action::*;
+    match action {
+        Boost => "God-Mode Boost",
+        Doctor => "WAN Doctor",
+        Hop2Repair => "Hop-2 Repair",
+        ZombieSync => "Zombie/Sync",
+        QuicFastpath => "QUIC Fast-Path",
+        Ipv6Guard => "IPv6 Guard",
+        FixExclamation => "Fix macOS !",
+        SafeRenew => "DHCP/DNS Renew",
+        MtuClamp => "MTU Clamp",
+        RootAuth => "Root Authorization",
+        ToggleWmm => "WMM VIP",
+        ToggleNoDelay => "TCP No-Delay",
+        PaletteToggleBuffers => "32MB Buffers",
+        Prewarm => "Pre-warm Edges",
+        ZeroLag => "Zero-Lag",
+        CamPacer => "CAM Pacer",
+        AutoPilot => "Auto-Pilot",
+        Shape => "Throttle/Shape",
+        CaptiveGateway => "Captive/Gateway",
+        RoamRescan => "Roam/Rescan",
+        Confirm => "run toggle/freeze",
+        _ => "that action",
+    }
+}
+
 /// Every user-triggered action. Lightweight UI-only ones (tab/cursor/visual) and
 /// heavy blocking ones (doctor/boost/speedtest) all flow through here so they run
 /// on the worker thread, never on the UI thread.
@@ -1561,5 +1678,37 @@ mod perf_tests {
         let nav_ms = t2.elapsed().as_secs_f64() * 1000.0;
         assert!(nav_ms < 20.0, "navigation blocked for {nav_ms:.1}ms");
         assert_eq!(app.active_tab, Tab::Processes);
+    }
+
+    #[test]
+    fn game_mode_blocks_risky_actions_but_allows_navigation() {
+        // While Game Mode is active, risky mutations must be no-ops (anti-cheat
+        // safe) and navigation must still work.
+        let mut app = App::new("en0", Arc::new(AtomicBool::new(false)));
+        // Force Game Mode on via the public entry (shells out but state flips).
+        let iface = app.collector.interface.clone();
+        let _ = crate::core::game_mode::enter(&mut app.game_mode, &iface, "LeagueClient".into());
+        assert!(app.game_mode.active());
+
+        // A risky action (Doctor) must NOT spawn a background task.
+        app.apply_action(Action::Doctor);
+        assert!(
+            !app.has_bg_inflight(),
+            "Doctor must be blocked (no bg task) while Game Mode is active"
+        );
+        assert!(app.status_msg.contains("GAME MODE"));
+
+        // Navigation is still allowed.
+        app.apply_action(Action::SwitchTab(Tab::Spectrum));
+        assert_eq!(app.active_tab, Tab::Spectrum);
+
+        // After Game Mode exits, the same risky action is allowed again.
+        let _ = crate::core::game_mode::exit(&mut app.game_mode, &iface);
+        assert!(!app.game_mode.active());
+        app.apply_action(Action::Doctor);
+        assert!(
+            app.has_bg_inflight(),
+            "Doctor should run again once Game Mode is off"
+        );
     }
 }

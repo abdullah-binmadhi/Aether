@@ -85,6 +85,10 @@ pub struct RenderState {
     pub palette_cursor: usize,
     /// (name, description) of the currently matching commands, in order.
     pub palette_items: Vec<(String, String)>,
+
+    /// Automatic Game Mode: active flag + detected game name, for the UI badge.
+    pub game_mode_active: bool,
+    pub game_name: String,
 }
 
 #[derive(Clone)]

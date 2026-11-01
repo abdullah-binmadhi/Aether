@@ -12,6 +12,7 @@ pub mod corewlan;
 pub mod daemon;
 pub mod disassoc;
 pub mod dns_engine;
+pub mod game_mode;
 pub mod gateway;
 pub mod health;
 pub mod history;

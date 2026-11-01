@@ -247,7 +247,21 @@ fn draw_header(f: &mut Frame, rs: &RenderState, area: Rect) {
     ]);
 
     let chunks = Layout::horizontal([Constraint::Min(20), Constraint::Length(26)]).split(inner);
-    f.render_widget(Paragraph::new(left), chunks[0]);
+    // When Game Mode is active, show a controller badge in the left region.
+    if rs.game_mode_active {
+        let left = Line::from(vec![
+            Span::styled(format!(" {page} "), invert()),
+            Span::raw("  "),
+            Span::styled(" 🎮 GAME MODE ", good()),
+            Span::styled(
+                format!(" {}  ·  {} Mbps", tel.band.label(), tel.tx_rate_mbps),
+                amber(),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(left), chunks[0]);
+    } else {
+        f.render_widget(Paragraph::new(left), chunks[0]);
+    }
     f.render_widget(Paragraph::new(right).alignment(Alignment::Right), chunks[1]);
 }
 
