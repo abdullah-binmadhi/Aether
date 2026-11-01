@@ -5,6 +5,7 @@
 
 use super::model::{Band, Neighbor, Telemetry};
 
+#[derive(Clone)]
 pub struct Block {
     pub label: &'static str,
     pub channels: &'static [i64],
@@ -24,6 +25,7 @@ const BLOCKS_5G: [(&str, &[i64]); 4] = [
     ("UNII-3 (149-161)", &[149, 153, 157, 161]),
 ];
 
+#[derive(Clone)]
 pub struct SpectrumReport {
     pub blocks_5g: Vec<Block>,
     pub collisions: Vec<Neighbor>,

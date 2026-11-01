@@ -349,7 +349,7 @@ mod tests {
         for mcs in 0..=11 {
             let (name, _code, bits, _c, _r, max80) = mcs_info(mcs);
             assert!(!name.is_empty());
-            assert!(bits >= 1 && bits <= 10);
+            assert!((1..=10).contains(&bits));
             assert!(max80 >= 86);
         }
         // Out-of-range clamps to the top entry.

@@ -353,6 +353,7 @@ pub fn run_apple_network_quality(state: &mut SpeedtestState) -> String {
 }
 
 /// Workload readiness + bottleneck interpretation for the Tab 5 view.
+#[derive(Clone)]
 pub struct Snapshot {
     pub workloads: Vec<(String, String, bool)>,
     pub interpretation: Vec<String>,
@@ -501,5 +502,53 @@ fn clock_str() -> String {
         "--:--:--".into()
     } else {
         s
+    }
+}
+
+/// A cloneable, thread-safe snapshot of the speedtest display fields. The live
+/// `SpeedtestState` holds an `Arc<AtomicBool>` and isn't `Clone`, so the worker
+/// publishes this plain view for the UI thread to render.
+#[derive(Clone)]
+pub struct SpeedtestView {
+    pub is_running: bool,
+    pub phase_name: String,
+    pub progress_pct: f64,
+    pub down_mbps: f64,
+    pub up_mbps: f64,
+    pub peak_down_mbps: f64,
+    pub peak_up_mbps: f64,
+    pub unloaded_rtt_ms: f64,
+    pub loaded_down_rtt_ms: f64,
+    pub loaded_up_rtt_ms: f64,
+    pub loaded_jitter_ms: f64,
+    pub rpm_score: i64,
+    pub bufferbloat_grade: String,
+    pub down_history: Vec<f64>,
+    pub up_history: Vec<f64>,
+    pub rtt_history: Vec<f64>,
+    pub last_run_ts: String,
+}
+
+impl SpeedtestView {
+    pub fn from_state(s: &SpeedtestState) -> Self {
+        SpeedtestView {
+            is_running: s.is_running.load(std::sync::atomic::Ordering::Relaxed),
+            phase_name: s.phase_name.clone(),
+            progress_pct: s.progress_pct,
+            down_mbps: s.down_mbps,
+            up_mbps: s.up_mbps,
+            peak_down_mbps: s.peak_down_mbps,
+            peak_up_mbps: s.peak_up_mbps,
+            unloaded_rtt_ms: s.unloaded_rtt_ms,
+            loaded_down_rtt_ms: s.loaded_down_rtt_ms,
+            loaded_up_rtt_ms: s.loaded_up_rtt_ms,
+            loaded_jitter_ms: s.loaded_jitter_ms,
+            rpm_score: s.rpm_score,
+            bufferbloat_grade: s.bufferbloat_grade.clone(),
+            down_history: s.down_history.clone(),
+            up_history: s.up_history.clone(),
+            rtt_history: s.rtt_history.clone(),
+            last_run_ts: s.last_run_ts.clone(),
+        }
     }
 }

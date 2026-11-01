@@ -76,6 +76,7 @@ pub struct LanDevice {
     pub role: String,
 }
 
+#[derive(Clone)]
 pub struct LanData {
     pub devices: Vec<LanDevice>,
     pub count: usize,

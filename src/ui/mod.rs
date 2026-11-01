@@ -1,4 +1,5 @@
-//! Amber CRT terminal UI built on ratatui.
+//! Amber CRT terminal UI built on ratatui. Renders purely from a `RenderState`
+//! snapshot — the UI thread never touches an engine, so it is always responsive.
 
 mod theme;
 mod views;
@@ -9,11 +10,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Tab};
+use crate::app::Tab;
+use crate::render::RenderState;
 use theme::{amber, amber_bold, dim, invert, score_color};
 
-/// Top-level draw: vital bar, active view, command deck.
-pub fn draw(f: &mut Frame, app: &App) {
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Top-level draw: vital bar, active view, command deck. `spin` advances the
+/// busy spinner frame.
+pub fn draw(f: &mut Frame, rs: &RenderState, spin: usize) {
     let area = f.area();
     if area.height < 12 || area.width < 60 {
         let msg = Paragraph::new(format!(
@@ -32,19 +37,19 @@ pub fn draw(f: &mut Frame, app: &App) {
     ])
     .split(area);
 
-    draw_vital_bar(f, app, chunks[0]);
-    match app.active_tab {
-        Tab::Dashboard => views::dashboard::render(f, app, chunks[1]),
-        Tab::Spectrum => views::spectrum::render(f, app, chunks[1]),
-        Tab::Processes => views::processes::render(f, app, chunks[1]),
-        Tab::Tuning => views::optimizer::render(f, app, chunks[1]),
-        Tab::SpeedTest => views::speedtest::render(f, app, chunks[1]),
+    draw_vital_bar(f, rs, chunks[0]);
+    match rs.active_tab {
+        Tab::Dashboard => views::dashboard::render(f, rs, chunks[1]),
+        Tab::Spectrum => views::spectrum::render(f, rs, chunks[1]),
+        Tab::Processes => views::processes::render(f, rs, chunks[1]),
+        Tab::Tuning => views::optimizer::render(f, rs, chunks[1]),
+        Tab::SpeedTest => views::speedtest::render(f, rs, chunks[1]),
     }
-    draw_command_deck(f, app, chunks[2]);
+    draw_command_deck(f, rs, chunks[2], spin);
 }
 
-fn draw_vital_bar(f: &mut Frame, app: &App, area: Rect) {
-    let tel = &app.telemetry;
+fn draw_vital_bar(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let tel = &rs.telemetry;
 
     let mut spans = vec![Span::styled(" // WIFI COCKPIT v2 // ", invert())];
     spans.push(Span::raw(" "));
@@ -68,10 +73,9 @@ fn draw_vital_bar(f: &mut Frame, app: &App, area: Rect) {
         score_color(tel.health_score),
     ));
 
-    // Right-anchored tabs.
     let mut tab_spans = Vec::new();
     for t in Tab::all() {
-        let style = if t == app.active_tab {
+        let style = if t == rs.active_tab {
             invert()
         } else {
             amber_bold()
@@ -86,7 +90,6 @@ fn draw_vital_bar(f: &mut Frame, app: &App, area: Rect) {
         chunks[1],
     );
 
-    // Separator rule on the second row.
     let rule = "━".repeat(area.width as usize);
     let rule_area = Rect {
         x: area.x,
@@ -97,21 +100,28 @@ fn draw_vital_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(rule).style(dim()), rule_area);
 }
 
-fn draw_command_deck(f: &mut Frame, app: &App, area: Rect) {
-    let keys = match app.active_tab {
+fn draw_command_deck(f: &mut Frame, rs: &RenderState, area: Rect, spin: usize) {
+    let keys = match rs.active_tab {
         Tab::Dashboard => " [M]Visual [O]Hop2 [D]Doctor [E]WiFi-Key [R]Roam [G]Boost [L]Zero-Lag [J]Ticket [Q]Quit ",
         Tab::Spectrum => " [E]WiFi-Key [R]Roam [B]Lock-5GHz [S]SweetSpot [C]Gateway [J]Ticket [Q]Quit ",
-        Tab::Processes => {
-            " [j/k]Select [Space]Pause(SIGSTOP) [B]Shape [N]Scan-LAN [U]Resume [Q]Quit "
-        }
+        Tab::Processes => " [j/k]Select [Space]Pause(SIGSTOP) [B]Shape [N]Scan-LAN [U]Resume [Q]Quit ",
         Tab::Tuning => " [j/k]Select [Space]Toggle [D]Doctor [F]Clear-DNS [P]Preset [A]Auto [6]IPv6 [S]Root ",
         Tab::SpeedTest => " [Space]Full-Suite [V]Quick-5s [N]Apple-RPM [D]Doctor [G]Boost [Q]Quit ",
     };
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
+
+    let (prefix, style) = if rs.busy {
+        (
+            format!(" [{}] ", SPINNER[spin % SPINNER.len()]),
+            theme::good(),
+        )
+    } else {
+        (" >> ".to_string(), amber_bold())
+    };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!(" >> {}", app.status_msg),
-            amber_bold(),
+            format!("{prefix}{}", rs.status_msg),
+            style,
         ))),
         chunks[0],
     );

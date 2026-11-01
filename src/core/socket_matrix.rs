@@ -39,6 +39,7 @@ impl Default for Sockets {
     }
 }
 
+#[derive(Clone)]
 pub struct SocketSample {
     pub signal_history: Vec<f64>,
     pub snr_history: Vec<f64>,

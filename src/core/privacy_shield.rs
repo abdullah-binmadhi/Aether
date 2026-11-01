@@ -10,6 +10,7 @@ pub struct PrivacyShield {
     last_gateway_ip: String,
 }
 
+#[derive(Clone)]
 pub struct ArpInfo {
     pub gateway_mac: String,
     pub status: String,

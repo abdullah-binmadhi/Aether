@@ -5,12 +5,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::render::RenderState;
 use crate::ui::theme::{alert, amber, amber_bold, bar, good, invert};
 use crate::ui::titled_block;
 
-pub fn render(f: &mut Frame, app: &App, area: Rect) {
-    let procs = &app.procmon.last;
+pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let procs = &rs.processes;
     let block = titled_block("PER-PROCESS BANDWIDTH FIREWALL ([Space] Pause │ [U] Resume All)");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -34,7 +34,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     }
 
     for (idx, p) in procs.iter().enumerate() {
-        let selected = idx == app.proc_cursor;
+        let selected = idx == rs.proc_cursor;
         let ptr = if selected { "▸" } else { " " };
         let state = if p.paused {
             "[PAUSED]"

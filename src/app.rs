@@ -36,6 +36,9 @@ use crate::core::wan_doctor::{WanDoctor, WanSnapshot};
 use crate::core::PingScope;
 use std::collections::HashMap;
 
+use crate::core::speedtest::{self, SpeedtestView};
+use crate::render::{HopView, RenderState};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Dashboard = 1,
@@ -364,5 +367,531 @@ impl App {
         if resumed > 0 {
             self.status_msg = format!("Resumed {resumed} frozen process(es) on exit.");
         }
+    }
+
+    /// Build a cloneable render snapshot for the UI thread. Precomputes the
+    /// preset controls, cockpit analysis, and visual-deck lines so the UI never
+    /// calls an engine method.
+    pub fn build_render(&self) -> RenderState {
+        let controls = self.preset.get_tuning_controls(
+            &self.telemetry,
+            &self.kernel_state,
+            &self.wan_snap,
+            self.antilag.root_authorized,
+            self.antilag.sync_daemons_frozen,
+        );
+        let analysis = self.preset.generate_cockpit_analysis(
+            &self.telemetry,
+            self.scope_snap.jitter_ms,
+            self.scope_snap.max_bloat_delta_ms,
+            self.scope_snap.avg_ms,
+            self.scope.cam_pacer_active,
+            &self.spectrum,
+            &self.wan_snap,
+            self.antilag.root_authorized,
+        );
+        let speed_snapshot = speedtest::snapshot(&self.speedtest, &self.telemetry);
+        let deck_lines = crate::ui::widgets::deck_body(self, self.visual_mode, 80, 7);
+
+        let hops = self
+            .scope_snap
+            .hops
+            .iter()
+            .map(|h| HopView {
+                hop: h.hop,
+                label: h.label.clone(),
+                target: h.target.clone(),
+                rtt_ms: h.rtt_ms,
+                jitter_ms: h.jitter_ms,
+                bloat_delta_ms: h.bloat_delta_ms,
+                loss_pct: h.loss_pct,
+                status: h.status.to_string(),
+            })
+            .collect();
+
+        RenderState {
+            telemetry: self.telemetry.clone(),
+            scope_avg_ms: self.scope_snap.avg_ms,
+            scope_jitter_ms: self.scope_snap.jitter_ms,
+            scope_loss_pct: self.scope_snap.loss_pct,
+            scope_down_kbs: self.scope_snap.down_kbs,
+            scope_up_kbs: self.scope_snap.up_kbs,
+            scope_max_bloat: self.scope_snap.max_bloat_delta_ms,
+            scope_fault: self.scope_snap.fault_diagnosis.clone(),
+            scope_hops: hops,
+            scope_rtt_history: self.scope_snap.rtt_history.clone(),
+            scope_down_history: self.scope_snap.down_kbs_history.clone(),
+            scope_up_history: self.scope_snap.up_kbs_history.clone(),
+            cam_pacer_active: self.scope.cam_pacer_active,
+            spectrum: self.spectrum.clone(),
+            wan_snap: self.wan_snap.clone(),
+            kernel_state: self.kernel_state.clone(),
+            dns_results: self.dns_results.clone(),
+            arp_info: self.arp_info.clone(),
+            router_status: self.router_status.clone(),
+            lan_data: self.lan_data.clone(),
+            socket_sample: self.socket_sample.clone(),
+            processes: self.procmon.last.clone(),
+            speedtest: SpeedtestView::from_state(&self.speedtest),
+            speedtest_snapshot: speed_snapshot,
+            tuning_controls: controls,
+            cockpit_analysis: analysis,
+            preset_effective_id: self.preset.effective_preset_id,
+            preset_selected_id: self.preset.selected_preset_id,
+            preset_cursor_idx: self.preset.cursor_idx,
+            preset_auto_reason: self.preset.auto_reason.clone(),
+            preset_before_after: self.preset.before_after_summary.clone(),
+            preset_detected_issues: self.preset.detected_issues.clone(),
+            auto_pilot_enabled: self.profiles.auto_pilot_enabled(),
+            root_authorized: self.antilag.root_authorized,
+            sync_daemons_frozen: self.antilag.sync_daemons_frozen,
+            deck_lines,
+            visual_mode: self.visual_mode,
+            active_tab: self.active_tab,
+            proc_cursor: self.proc_cursor,
+            status_msg: self.status_msg.clone(),
+            busy: self.busy,
+            pw_edit_active: self.pw_edit_active,
+            pw_edit_ssid: self.pw_edit_ssid.clone(),
+            pw_edit_buf: self.pw_edit_buf.clone(),
+        }
+    }
+
+    /// Execute a user action. Called on the worker thread, so it may block.
+    pub fn apply_action(&mut self, action: Action) {
+        use Action::*;
+        let tab = self.active_tab;
+        match action {
+            Quit => self.should_quit = true,
+            SwitchTab(t) => self.active_tab = t,
+            NextTab => self.active_tab = self.active_tab.next(),
+            PrevTab => self.active_tab = self.active_tab.prev(),
+            CursorDown => {
+                if tab == Tab::Processes && !self.procmon.last.is_empty() {
+                    self.proc_cursor = (self.proc_cursor + 1).min(self.procmon.last.len() - 1);
+                } else if tab == Tab::Tuning {
+                    self.preset.cursor_idx = (self.preset.cursor_idx + 1) % 12;
+                }
+            }
+            CursorUp => {
+                if tab == Tab::Processes {
+                    self.proc_cursor = self.proc_cursor.saturating_sub(1);
+                } else if tab == Tab::Tuning {
+                    self.preset.cursor_idx = (self.preset.cursor_idx + 11) % 12;
+                } else {
+                    self.status_msg = self.scope.toggle_cam_pacer();
+                }
+            }
+            CamPacer => self.status_msg = self.scope.toggle_cam_pacer(),
+            VisualNext => {
+                self.visual_mode = (self.visual_mode % 4) + 1;
+                self.status_msg = format!(
+                    "Switched Visual Telemetry Deck -> [{}]",
+                    visual_name(self.visual_mode)
+                );
+            }
+            VisualPrev => {
+                self.visual_mode = if self.visual_mode == 1 {
+                    4
+                } else {
+                    self.visual_mode - 1
+                };
+                self.status_msg = format!(
+                    "Switched Visual Telemetry Deck -> [{}]",
+                    visual_name(self.visual_mode)
+                );
+            }
+            Confirm => self.action_confirm(),
+            ResumeAll => {
+                let n = self.procmon.resume_all();
+                self.status_msg = format!("Resumed {n} frozen processes via SIGCONT.");
+            }
+            LanSweep => {
+                let ip = self.telemetry.ipv4.clone();
+                let gw = self.telemetry.gateway.clone();
+                self.lan_data = self.lan_scanner.scan_lan(&ip, &gw, true);
+                self.status_msg = format!("[OK] LAN Sweep Complete: {}", self.lan_data.summary);
+            }
+            SpeedFull => {
+                let target = self
+                    .scope
+                    .isp_ip
+                    .parse()
+                    .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
+                self.status_msg = speedtest::run_full_suite(&mut self.speedtest, target, false);
+            }
+            SpeedQuick => {
+                let target = self
+                    .scope
+                    .isp_ip
+                    .parse()
+                    .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
+                self.status_msg = speedtest::run_full_suite(&mut self.speedtest, target, true);
+            }
+            SpeedApple => {
+                self.status_msg = speedtest::run_apple_network_quality(&mut self.speedtest)
+            }
+            CyclePreset => {
+                self.preset.cycle_preset();
+                self.status_msg = format!(
+                    "Switched Smart Tuning Preset -> #{}",
+                    self.preset.selected_preset_id
+                );
+            }
+            ToggleWmm => self.status_msg = self.kernel.toggle_wmm_vip_priority(None),
+            ToggleNoDelay => self.status_msg = self.kernel.toggle_ffxiv_tcp_nodelay(None),
+            Hop2Repair => {
+                let gw = self.telemetry.gateway.clone();
+                crate::core::hop2::refresh_gateway_arp(&gw);
+                self.kernel.toggle_ffxiv_tcp_nodelay(Some(true));
+                self.kernel.toggle_wmm_vip_priority(Some(true));
+                self.status_msg = "Ran 6-Stage Hop 2 Anti-Bloat & De-Jitter Repair.".into();
+            }
+            Prewarm => self.status_msg = self.kernel.prewarm_workload_edges(),
+            Boost => {
+                self.profiles.set_zero_lag_mode(true);
+                self.scope.cam_pacer_active = true;
+                let (_, doc) = self
+                    .wan_doctor
+                    .run_auto_doctor(Some(&mut self.kernel), false);
+                let boost = {
+                    let tel = self.telemetry.clone();
+                    self.antilag
+                        .run_god_mode_boost(&tel, &self.dns, &mut self.kernel)
+                };
+                self.dns_results = self.dns.race_resolvers();
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                self.status_msg = format!("{boost} │ {doc}");
+            }
+            ZeroLag => {
+                let mut tel = self.telemetry.clone();
+                let m = self.antilag.toggle_awdl(Some(&mut tel));
+                self.telemetry = tel;
+                self.profiles
+                    .set_zero_lag_mode(self.antilag.zero_lag_active);
+                self.status_msg = m;
+            }
+            ZombieSync => {
+                let (_, z) = self.wan_doctor.reap_zombie_sockets();
+                let s = self
+                    .antilag
+                    .toggle_sync_daemons(!self.antilag.sync_daemons_frozen);
+                self.status_msg = format!("{z} │ {s}");
+            }
+            Doctor => {
+                let (_, doc) = self
+                    .wan_doctor
+                    .run_auto_doctor(Some(&mut self.kernel), false);
+                self.dns_results = self.dns.race_resolvers();
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                self.status_msg = doc;
+            }
+            QuicFastpath => {
+                let (_, m) = self.wan_doctor.toggle_quic_fastpath(None);
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                self.status_msg = m;
+            }
+            Shape => {
+                if tab == Tab::Processes {
+                    if let Some(p) = self.procmon.last.get(self.proc_cursor).cloned() {
+                        self.status_msg = self.shaper.toggle_throttle_pid(p.pid, &p.name, 8);
+                    }
+                } else {
+                    self.status_msg = "5GHz sibling lock requires networksetup association.".into();
+                }
+            }
+            SafeRenew => {
+                crate::core::dns_engine::DnsEngine::flush_cache();
+                let iface = self.collector.interface.clone();
+                crate::core::antilag::AntiLagEngine::refresh_dhcp_and_routes(&iface);
+                self.status_msg =
+                    "Refreshed DHCP lease & DNS cache safely (zero radio disruption).".into();
+            }
+            FixExclamation => {
+                let (_, m) = self.wan_doctor.fix_macos_exclamation_mark();
+                self.status_msg = m;
+            }
+            Ipv6Guard => {
+                let (_, m) = self.wan_doctor.toggle_ipv6_guard(None);
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                self.status_msg = m;
+            }
+            MtuClamp => {
+                let new_mtu = if self.telemetry.mtu >= 1500 {
+                    1492
+                } else {
+                    1500
+                };
+                self.status_msg = self.kernel.set_optimal_mtu(new_mtu);
+            }
+            MacPrivacy => self.status_msg = self.privacy.randomize_mac(),
+            SweetSpot => {
+                let q = crate::core::acoustic_radar::calculate_quality_score(&self.telemetry);
+                self.status_msg = format!(
+                    "Sweet-Spot Locator: {} {} ({:.1} clicks/s) │ SNR {}dB MCS {}",
+                    q.meter, q.rating, q.click_hz, q.snr_db, q.mcs_index
+                );
+            }
+            RootAuth => self.status_msg = self.antilag.authorize_root_privileges(),
+            AutoPilot => {
+                let state = self.profiles.toggle_auto_pilot();
+                if state {
+                    self.preset.selected_preset_id = 1;
+                }
+                self.status_msg = format!(
+                    "Closed-Loop Smart Preset Auto-Adapt {}.",
+                    if state { "ENABLED" } else { "MANUAL" }
+                );
+            }
+            CaptiveGateway => {
+                let cap = self.captive.probe_portal(true);
+                if cap.captive {
+                    self.status_msg = self.captive.breakout_captive_portal(Some(&self.dns));
+                } else {
+                    self.router_status = self.router_bot.probe_ports();
+                    self.status_msg = format!(
+                        "Gateway ({}): {} │ {}",
+                        self.router_status.ip, self.router_status.summary, cap.summary
+                    );
+                }
+            }
+            RoamRescan => {
+                self.refresh();
+                self.spectrum = crate::core::spectrum::analyze(&self.telemetry);
+                self.status_msg =
+                    "Smart BSSID Roam Evaluation & 5GHz/2.4GHz Rescan complete.".into();
+            }
+            ExportTicket => {
+                let hist = self.telemetry.history_summary.clone();
+                let (_, msg) = crate::core::ticket::export_report(
+                    &self.telemetry,
+                    &self.scope_snap,
+                    Some(&hist),
+                );
+                self.status_msg = msg;
+            }
+            // Password editor.
+            PwOpen => {
+                let mut curr = self.telemetry.ssid.clone();
+                if matches!(curr.as_str(), "Scanning..." | "Disconnected" | "") {
+                    curr = self
+                        .telemetry
+                        .saved_networks
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Wi-Fi".into());
+                }
+                self.pw_edit_ssid = curr.clone();
+                self.pw_edit_idx = 0;
+                self.pw_edit_buf = self.profiles.get_wifi_password(&curr);
+                self.pw_edit_active = true;
+            }
+            PwCancel => {
+                self.pw_edit_active = false;
+                self.status_msg = "Wi-Fi Password editor closed.".into();
+            }
+            PwChar(c) => self.pw_edit_buf.push(c),
+            PwBackspace => {
+                self.pw_edit_buf.pop();
+            }
+            PwTab => {
+                let mut saved = self.telemetry.saved_networks.clone();
+                let curr = self.telemetry.ssid.clone();
+                if !curr.is_empty() && !saved.contains(&curr) {
+                    saved.insert(0, curr);
+                }
+                if !saved.is_empty() {
+                    self.pw_edit_idx = (self.pw_edit_idx + 1) % saved.len();
+                    self.pw_edit_ssid = saved[self.pw_edit_idx].clone();
+                    self.pw_edit_buf = self.profiles.get_wifi_password(&self.pw_edit_ssid);
+                }
+            }
+            PwSave => {
+                let target = self.pw_edit_ssid.clone();
+                let pw = self.pw_edit_buf.trim().to_string();
+                self.pw_edit_active = false;
+                self.status_msg = if pw.is_empty() {
+                    self.profiles.set_wifi_password(&target, "");
+                    format!("Cleared stored password for '{target}'.")
+                } else {
+                    self.profiles.set_wifi_password(&target, &pw)
+                };
+                self.telemetry.wifi_password =
+                    self.profiles.get_wifi_password(&self.telemetry.ssid);
+            }
+            PwKeychain => {
+                let target = self.pw_edit_ssid.clone();
+                self.pw_edit_active = false;
+                self.status_msg = match self.profiles.fetch_keychain_password(&target) {
+                    Some(pw) => format!("[OK] Synced password for '{target}' from macOS Keychain: {pw}"),
+                    None => format!("[!] Keychain entry not found or cancelled for '{target}'. Press [E] to type it."),
+                };
+            }
+        }
+    }
+
+    fn action_confirm(&mut self) {
+        match self.active_tab {
+            Tab::Processes => {
+                if let Some(p) = self.procmon.last.get(self.proc_cursor).cloned() {
+                    self.status_msg = self.procmon.toggle_pause(p.pid, &p.name);
+                }
+            }
+            Tab::Tuning => self.toggle_tuning_control(),
+            Tab::SpeedTest => {
+                let target = self
+                    .scope
+                    .isp_ip
+                    .parse()
+                    .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
+                self.status_msg = speedtest::run_full_suite(&mut self.speedtest, target, false);
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_tuning_control(&mut self) {
+        let idx = self.preset.cursor_idx;
+        let controls = self.preset.get_tuning_controls(
+            &self.telemetry,
+            &self.kernel_state,
+            &self.wan_snap,
+            self.antilag.root_authorized,
+            self.antilag.sync_daemons_frozen,
+        );
+        let Some(ctrl) = controls.get(idx.min(controls.len().saturating_sub(1))) else {
+            return;
+        };
+        let id = ctrl.id;
+        self.status_msg = match id {
+            "wmm_vip" => self.kernel.toggle_wmm_vip_priority(None),
+            "cam_pacer" => self.scope.toggle_cam_pacer(),
+            "ffxiv_nodelay" => self.kernel.toggle_ffxiv_tcp_nodelay(None),
+            "buf_8mb" => self.kernel.toggle_8mb_streaming_buffers(None),
+            "wan_doctor" => {
+                let (_, m) = self
+                    .wan_doctor
+                    .run_auto_doctor(Some(&mut self.kernel), false);
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                m
+            }
+            "ipv6_guard" => {
+                let r = self.wan_doctor.toggle_ipv6_guard(None).1;
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                r
+            }
+            "quic_fastpath" => {
+                let r = self.wan_doctor.toggle_quic_fastpath(None).1;
+                self.wan_snap = self.wan_doctor.get_snapshot();
+                r
+            }
+            "zero_lag" => {
+                let mut tel = self.telemetry.clone();
+                let m = self.antilag.toggle_awdl(Some(&mut tel));
+                self.telemetry = tel;
+                m
+            }
+            "sync_freeze" => {
+                let (_, z) = self.wan_doctor.reap_zombie_sockets();
+                let s = self
+                    .antilag
+                    .toggle_sync_daemons(!self.antilag.sync_daemons_frozen);
+                format!("{z} │ {s}")
+            }
+            "band_5g" => "5GHz sibling lock requires networksetup association.".into(),
+            "mtu_clamp" => {
+                let new_mtu = if self.telemetry.mtu >= 1500 {
+                    1492
+                } else {
+                    1500
+                };
+                self.kernel.set_optimal_mtu(new_mtu)
+            }
+            "root_auth" => self.antilag.authorize_root_privileges(),
+            _ => "Module updated.".into(),
+        };
+    }
+}
+
+fn visual_name(m: u8) -> &'static str {
+    match m {
+        1 => "1:TOPOLOGY PIPELINE DIAGRAM",
+        2 => "2:2D RF SIGNAL & SNR CHRONOGRAPH",
+        3 => "3:802.11 QAM CONSTELLATION & MIMO",
+        _ => "4:KERNEL TCP SOCKET & PORT MATRIX",
+    }
+}
+
+/// Every user-triggered action. Lightweight UI-only ones (tab/cursor/visual) and
+/// heavy blocking ones (doctor/boost/speedtest) all flow through here so they run
+/// on the worker thread, never on the UI thread.
+pub enum Action {
+    Quit,
+    SwitchTab(Tab),
+    NextTab,
+    PrevTab,
+    CursorUp,
+    CursorDown,
+    CamPacer,
+    VisualNext,
+    VisualPrev,
+    Confirm,
+    ResumeAll,
+    LanSweep,
+    SpeedFull,
+    SpeedQuick,
+    SpeedApple,
+    CyclePreset,
+    ToggleWmm,
+    ToggleNoDelay,
+    Hop2Repair,
+    Prewarm,
+    Boost,
+    ZeroLag,
+    ZombieSync,
+    Doctor,
+    QuicFastpath,
+    Shape,
+    SafeRenew,
+    FixExclamation,
+    Ipv6Guard,
+    MtuClamp,
+    MacPrivacy,
+    SweetSpot,
+    RootAuth,
+    AutoPilot,
+    CaptiveGateway,
+    RoamRescan,
+    ExportTicket,
+    PwOpen,
+    PwCancel,
+    PwChar(char),
+    PwBackspace,
+    PwTab,
+    PwSave,
+    PwKeychain,
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    #[test]
+    fn build_render_is_cheap_and_nonblocking() {
+        // build_render must only clone already-collected data + run pure
+        // computations (no ICMP/curl/networksetup). It should complete in well
+        // under a frame budget even on a cold App.
+        let mut app = App::new("en0", Arc::new(AtomicBool::new(false)));
+        // One refresh to populate fields (this DOES do I/O — not what we measure).
+        app.refresh();
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            let _ = app.build_render();
+        }
+        let per = t.elapsed().as_secs_f64() * 1000.0 / 200.0;
+        // Each render-snapshot build must be far under a 16ms frame.
+        assert!(per < 5.0, "build_render too slow: {per:.2} ms/call");
     }
 }

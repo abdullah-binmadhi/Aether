@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::cmd;
 
+#[derive(Clone)]
 pub struct RouterStatus {
     pub ip: String,
     pub ports: BTreeMap<String, bool>,

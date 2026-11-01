@@ -1,20 +1,18 @@
 //! Tab [5] Speed/bufferbloat/workload lab. Ported from speedtest.py.
 
-use std::sync::atomic::Ordering;
-
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::App;
 use crate::core::speedtest;
+use crate::render::RenderState;
 use crate::ui::theme::{alert, amber, amber_bold, bar, good, sparkline};
 use crate::ui::titled_block;
 
-pub fn render(f: &mut Frame, app: &App, area: Rect) {
-    let st = &app.speedtest;
-    let snap = speedtest::snapshot(st, &app.telemetry);
+pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let st = &rs.speedtest;
+    let snap = &rs.speedtest_snapshot;
 
     let rows = Layout::vertical([
         Constraint::Length(3), // phase
@@ -25,7 +23,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     .split(area);
 
     // Phase bar.
-    let is_running = st.is_running.load(Ordering::Relaxed);
+    let is_running = st.is_running;
     let phase_block =
         titled_block("SPEED, BUFFERBLOAT & WORKLOAD LAB ([Space] Full │ [V] 5s │ [N] Apple RPM)");
     let pi = phase_block.inner(rows[0]);
@@ -44,8 +42,8 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     // Gauges + scorecard.
     let mid =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
-    render_gauges(f, app, mid[0], &snap);
-    render_scorecard(f, app, mid[1]);
+    render_gauges(f, rs, mid[0], snap);
+    render_scorecard(f, rs, mid[1]);
 
     // Oscilloscope.
     let scope_block = titled_block("REAL-TIME THROUGHPUT & LOADED PING OSCILLOSCOPE");
@@ -83,12 +81,12 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     // Workloads + interpretation.
     let bot =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[3]);
-    render_workloads(f, bot[0], &snap);
-    render_interpretation(f, bot[1], &snap);
+    render_workloads(f, bot[0], snap);
+    render_interpretation(f, bot[1], snap);
 }
 
-fn render_gauges(f: &mut Frame, app: &App, area: Rect, snap: &speedtest::Snapshot) {
-    let st = &app.speedtest;
+fn render_gauges(f: &mut Frame, rs: &RenderState, area: Rect, snap: &speedtest::Snapshot) {
+    let st = &rs.speedtest;
     let block = titled_block("THROUGHPUT GAUGES & PHY EFFICIENCY");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -120,8 +118,8 @@ fn render_gauges(f: &mut Frame, app: &App, area: Rect, snap: &speedtest::Snapsho
         Line::from(Span::styled(
             format!(
                 "◆ Wi-Fi PHY Link : {link} Mbps ({} MCS {})",
-                app.telemetry.band.label(),
-                app.telemetry.mcs_index
+                rs.telemetry.band.label(),
+                rs.telemetry.mcs_index
             ),
             amber(),
         )),
@@ -136,8 +134,8 @@ fn render_gauges(f: &mut Frame, app: &App, area: Rect, snap: &speedtest::Snapsho
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_scorecard(f: &mut Frame, app: &App, area: Rect) {
-    let st = &app.speedtest;
+fn render_scorecard(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let st = &rs.speedtest;
     let block = titled_block("BUFFERBLOAT & RESPONSIVENESS SCORECARD");
     let inner = block.inner(area);
     f.render_widget(block, area);

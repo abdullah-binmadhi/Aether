@@ -31,6 +31,7 @@ pub fn preset_definitions() -> Vec<PresetDef> {
 }
 
 /// A single tuning-control row for Tab 4.
+#[derive(Clone)]
 pub struct Control {
     pub id: &'static str,
     pub key: &'static str,
@@ -39,6 +40,7 @@ pub struct Control {
     pub status: String,
 }
 
+#[derive(Clone)]
 pub struct CockpitAnalysis {
     pub analysis_lines: Vec<String>,
     pub recommended_action: String,

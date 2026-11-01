@@ -5,44 +5,38 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::render::RenderState;
 use crate::ui::theme::{alert, amber, amber_bold, bar, good, invert, sparkline};
 use crate::ui::titled_block;
+use crate::ui::widgets::DECK_MODES;
 
-pub fn render(f: &mut Frame, app: &App, area: Rect) {
+pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
     let rows = Layout::vertical([Constraint::Min(8), Constraint::Length(9)]).split(area);
     let cols =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
-    render_pipe(f, app, cols[0]);
-    render_flow(f, app, cols[1]);
+    render_pipe(f, rs, cols[0]);
+    render_flow(f, rs, cols[1]);
     let bot =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
-    render_analysis(f, app, bot[0]);
-    render_visual_deck(f, app, bot[1]);
+    render_analysis(f, rs, bot[0]);
+    render_visual_deck(f, rs, bot[1]);
 }
 
-fn render_visual_deck(f: &mut Frame, app: &App, area: Rect) {
-    use crate::ui::widgets::{deck_body, DECK_MODES};
+fn render_visual_deck(f: &mut Frame, rs: &RenderState, area: Rect) {
     let block = titled_block("VISUAL TELEMETRY DECK ([M] or [ / ] Switch View)");
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 2 {
         return;
     }
-    let active = ((app.visual_mode.wrapping_sub(1)) % 4) + 1;
+    let active = ((rs.visual_mode.wrapping_sub(1)) % 4) + 1;
     let mut pills = Vec::new();
     for (id, label) in DECK_MODES {
         let style = if id == active { invert() } else { amber_bold() };
         pills.push(Span::styled(format!(" [{label}] "), style));
     }
-    let body = deck_body(
-        app,
-        app.visual_mode,
-        inner.width as usize,
-        (inner.height as usize).saturating_sub(1),
-    );
     let mut lines = vec![Line::from(pills)];
-    for (idx, l) in body.iter().enumerate() {
+    for (idx, l) in rs.deck_lines.iter().enumerate() {
         let style = if l.contains("[!]") || l.contains("╌✕") {
             alert()
         } else if idx == 0
@@ -64,17 +58,8 @@ fn render_visual_deck(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_analysis(f: &mut Frame, app: &App, area: Rect) {
-    let analysis = app.preset.generate_cockpit_analysis(
-        &app.telemetry,
-        app.scope_snap.jitter_ms,
-        app.scope_snap.max_bloat_delta_ms,
-        app.scope_snap.avg_ms,
-        app.scope.cam_pacer_active,
-        &app.spectrum,
-        &app.wan_snap,
-        app.antilag.root_authorized,
-    );
+fn render_analysis(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let analysis = &rs.cockpit_analysis;
     let block = titled_block("LIVE RF & WORKLOAD INTERPRETATION");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -102,8 +87,8 @@ fn render_analysis(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_pipe(f: &mut Frame, app: &App, area: Rect) {
-    let tel = &app.telemetry;
+fn render_pipe(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let tel = &rs.telemetry;
     let block = titled_block("THE PIPE (RF & AIRTIME TELEMETRY)");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -204,8 +189,7 @@ fn render_pipe(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_flow(f: &mut Frame, app: &App, area: Rect) {
-    let s = &app.scope_snap;
+fn render_flow(f: &mut Frame, rs: &RenderState, area: Rect) {
     let block = titled_block("THE FLOW (OSCILLOSCOPE & 4-HOP ISOLATION MATRIX)");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -215,31 +199,35 @@ fn render_flow(f: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(
             format!(
                 "PING {:4.1}ms  Jit {:3.1}ms  Loss {:3.1}% │ ▼{:6.1} ▲{:5.1} KB/s",
-                s.avg_ms, s.jitter_ms, s.loss_pct, s.down_kbs, s.up_kbs
+                rs.scope_avg_ms,
+                rs.scope_jitter_ms,
+                rs.scope_loss_pct,
+                rs.scope_down_kbs,
+                rs.scope_up_kbs
             ),
             amber_bold(),
         )),
         Line::from(Span::styled(
             format!(
                 "RTT {} {:.1}ms",
-                sparkline(&s.rtt_history, spark_w, 10.0),
-                s.avg_ms
+                sparkline(&rs.scope_rtt_history, spark_w, 10.0),
+                rs.scope_avg_ms
             ),
             amber_bold(),
         )),
         Line::from(Span::styled(
             format!(
                 "T/P {} {:.0}K",
-                sparkline(&s.down_kbs_history, spark_w, 1.0),
-                s.down_kbs
+                sparkline(&rs.scope_down_history, spark_w, 1.0),
+                rs.scope_down_kbs
             ),
             amber(),
         )),
         Line::from(Span::styled(
             format!(
                 "UP  {} {:.0}K",
-                sparkline(&s.up_kbs_history, spark_w, 1.0),
-                s.up_kbs
+                sparkline(&rs.scope_up_history, spark_w, 1.0),
+                rs.scope_up_kbs
             ),
             amber(),
         )),
@@ -252,14 +240,14 @@ fn render_flow(f: &mut Frame, app: &App, area: Rect) {
                 "RTT",
                 "JIT",
                 "BLOAT",
-                s.max_bloat_delta_ms,
-                if s.cam_pacer_active { ", CAM on" } else { "" }
+                rs.scope_max_bloat,
+                if rs.cam_pacer_active { ", CAM on" } else { "" }
             ),
             amber_bold(),
         )),
     ];
 
-    for h in &s.hops {
+    for h in &rs.scope_hops {
         let style = if h.status.starts_with("[!]") {
             alert()
         } else if h.status.starts_with("[OK]") {
@@ -277,13 +265,13 @@ fn render_flow(f: &mut Frame, app: &App, area: Rect) {
     }
 
     lines.push(Line::from(Span::raw("")));
-    let verdict_style = if s.fault_diagnosis.starts_with("[OK]") {
+    let verdict_style = if rs.scope_fault.starts_with("[OK]") {
         good()
     } else {
         alert()
     };
     lines.push(Line::from(Span::styled(
-        format!("VERDICT: {}", s.fault_diagnosis),
+        format!("VERDICT: {}", rs.scope_fault),
         verdict_style,
     )));
 

@@ -5,22 +5,22 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::App;
 use crate::core::preset_engine::preset_definitions;
+use crate::render::RenderState;
 use crate::ui::theme::{alert, amber, amber_bold, bar, good, invert};
 use crate::ui::titled_block;
 
-pub fn render(f: &mut Frame, app: &App, area: Rect) {
+pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(6), Constraint::Min(6)]).split(area);
-    render_preset_bar(f, app, rows[0]);
+    render_preset_bar(f, rs, rows[0]);
     let cols =
         Layout::horizontal([Constraint::Percentage(54), Constraint::Percentage(46)]).split(rows[1]);
-    render_controls(f, app, cols[0]);
-    render_wan_doctor(f, app, cols[1]);
+    render_controls(f, rs, cols[0]);
+    render_wan_doctor(f, rs, cols[1]);
 }
 
-fn render_preset_bar(f: &mut Frame, app: &App, area: Rect) {
-    let auto = app.profiles.auto_pilot_enabled();
+fn render_preset_bar(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let auto = rs.auto_pilot_enabled;
     let title = format!(
         "CLOSED-LOOP AUTO-ADAPT PRESET ENGINE ([A] Auto-Adapt: {} │ [P] Cycle Preset)",
         if auto { "● ON" } else { "○ MANUAL" }
@@ -30,8 +30,8 @@ fn render_preset_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     let defs = preset_definitions();
-    let eff = app.preset.effective_preset_id;
-    let sel = app.preset.selected_preset_id;
+    let eff = rs.preset_effective_id;
+    let sel = rs.preset_selected_id;
 
     let mut pills = Vec::new();
     for p in &defs {
@@ -46,9 +46,8 @@ fn render_preset_bar(f: &mut Frame, app: &App, area: Rect) {
     } else {
         "MANUAL LOCK"
     };
-    let issues = app
-        .preset
-        .detected_issues
+    let issues = rs
+        .preset_detected_issues
         .iter()
         .take(3)
         .cloned()
@@ -60,7 +59,7 @@ fn render_preset_bar(f: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(
             format!(
                 "ACTIVE PRESET : {} [{mode_tag}] ── {}",
-                active_p.name, app.preset.auto_reason
+                active_p.name, rs.preset_auto_reason
             ),
             good(),
         )),
@@ -73,29 +72,23 @@ fn render_preset_bar(f: &mut Frame, app: &App, area: Rect) {
             },
         )),
         Line::from(Span::styled(
-            format!("VERIFICATION  : {}", app.preset.before_after_summary),
+            format!("VERIFICATION  : {}", rs.preset_before_after),
             good(),
         )),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_controls(f: &mut Frame, app: &App, area: Rect) {
+fn render_controls(f: &mut Frame, rs: &RenderState, area: Rect) {
     let block = titled_block("12 WORKLOAD TUNING MODULES (j/k Select, Space/Key Toggle)");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let controls = app.preset.get_tuning_controls(
-        &app.telemetry,
-        &app.kernel_state,
-        &app.wan_snap,
-        app.antilag.root_authorized,
-        app.antilag.sync_daemons_frozen,
-    );
+    let controls = &rs.tuning_controls;
     let name_w = (inner.width as usize).saturating_sub(34).max(18);
     let mut lines = Vec::new();
     for (idx, c) in controls.iter().enumerate() {
-        let selected = idx == app.preset.cursor_idx;
+        let selected = idx == rs.preset_cursor_idx;
         let ptr = if selected { "▸" } else { " " };
         let pill = if c.active { "[● ON ]" } else { "[○ OFF]" };
         let name: String = c.name.chars().take(name_w).collect();
@@ -118,16 +111,16 @@ fn render_controls(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_wan_doctor(f: &mut Frame, app: &App, area: Rect) {
+fn render_wan_doctor(f: &mut Frame, rs: &RenderState, area: Rect) {
     let block = titled_block("WAN & YOUTUBE GGC DOCTOR + ECS DNS RACER");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let wd = &app.wan_snap;
-    let active_dns = if app.telemetry.dns_servers.is_empty() {
+    let wd = &rs.wan_snap;
+    let active_dns = if rs.telemetry.dns_servers.is_empty() {
         "DHCP Router Default".to_string()
     } else {
-        app.telemetry.dns_servers.join(", ")
+        rs.telemetry.dns_servers.join(", ")
     };
 
     let mut lines = vec![
@@ -141,7 +134,7 @@ fn render_wan_doctor(f: &mut Frame, app: &App, area: Rect) {
         )),
     ];
 
-    for (idx, res) in app.dns_results.iter().take(4).enumerate() {
+    for (idx, res) in rs.dns_results.iter().take(4).enumerate() {
         let ms = res.avg_ms;
         let speed = (120.0 - ms.min(115.0)).max(5.0);
         let ms_str = if res.reachable {
@@ -186,22 +179,22 @@ fn render_wan_doctor(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(Span::styled(
         format!(
             "TCP SCALE: Scale={}, MSS={} │ WMM QoS={}",
-            app.kernel_state
+            rs.kernel_state
                 .get("win_scale_factor")
                 .cloned()
                 .unwrap_or_else(|| "8".into()),
-            app.kernel_state
+            rs.kernel_state
                 .get("mssdflt")
                 .cloned()
                 .unwrap_or_else(|| "1452".into()),
-            app.kernel_state
+            rs.kernel_state
                 .get("wmm_wifi")
                 .cloned()
                 .unwrap_or_else(|| "0".into()),
         ),
         amber(),
     )));
-    let arp = app.arp_info.status.replace('✔', "[OK]").replace('⚠', "[!]");
+    let arp = rs.arp_info.status.replace('✔', "[OK]").replace('⚠', "[!]");
     lines.push(Line::from(Span::styled(
         format!("SECURITY: {arp} │ Zombies: {}", wd.zombie_socket_count),
         if arp.contains("[!]") || wd.zombie_socket_count >= 5 {

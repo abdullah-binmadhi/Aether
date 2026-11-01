@@ -5,20 +5,20 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::App;
 use crate::core::spectrum;
+use crate::render::RenderState;
 use crate::ui::theme::{alert, amber, amber_bold, bar, good};
 use crate::ui::titled_block;
 
-pub fn render(f: &mut Frame, app: &App, area: Rect) {
+pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
     let rows =
         Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area);
-    render_heatmap(f, app, rows[0]);
-    render_neighbors(f, app, rows[1]);
+    render_heatmap(f, rs, rows[0]);
+    render_neighbors(f, rs, rows[1]);
 }
 
-fn render_heatmap(f: &mut Frame, app: &App, area: Rect) {
-    let report = spectrum::analyze(&app.telemetry);
+fn render_heatmap(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let report = spectrum::analyze(&rs.telemetry);
     let block = titled_block("5GHz & 2.4GHz SPECTRUM CONGESTION & CHANNEL OVERLAP");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -93,8 +93,8 @@ fn render_heatmap(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_neighbors(f: &mut Frame, app: &App, area: Rect) {
-    let tel = &app.telemetry;
+fn render_neighbors(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let tel = &rs.telemetry;
     let block = titled_block("DETECTED LOCAL WI-FI NETWORKS & RF SIGNATURES");
     let inner = block.inner(area);
     f.render_widget(block, area);

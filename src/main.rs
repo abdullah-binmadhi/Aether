@@ -12,10 +12,11 @@
 
 mod app;
 mod core;
+mod render;
 mod ui;
 
 use std::io::{self, Stdout};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,6 @@ use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::prelude::{CrosstermBackend, Terminal};
 
 use app::{App, Tab};
-use core::speedtest;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -500,9 +500,20 @@ fn run_oneshot(cli: &Cli) -> io::Result<()> {
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
+use crate::app::Action;
+use crate::render::RenderState;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Mutex;
+
+/// Run the interactive TUI with a worker-thread architecture:
+/// - the worker thread owns every engine and runs all blocking work (refreshes,
+///   doctor, speedtest, boost, …);
+/// - the UI thread only reads the published `RenderState` and forwards keypresses.
+///
+/// This is what makes `[D]`, speedtest, etc. non-blocking: a keypress just sends
+/// an `Action` down the channel and returns instantly, so the UI keeps drawing
+/// (with a spinner) while the worker does the slow work.
 fn run_tui(interface: &str) -> io::Result<()> {
-    // Shared stop flag; the signal handler flips it so Ctrl-C / SIGTERM / SIGHUP
-    // all exit through the same cleanup path that resumes frozen processes.
     let stop = Arc::new(AtomicBool::new(false));
     for sig in [
         signal_hook::consts::SIGINT,
@@ -512,22 +523,280 @@ fn run_tui(interface: &str) -> io::Result<()> {
         signal_hook::flag::register(sig, Arc::clone(&stop))?;
     }
 
+    // Build the app on the worker thread (engines aren't Send-friendly to share),
+    // but we need its first render snapshot to seed the UI. Construct it inside
+    // the worker and hand back the initial snapshot via the shared mutex.
+    let shared: Arc<Mutex<Option<RenderState>>> = Arc::new(Mutex::new(None));
+    let busy = Arc::new(AtomicBool::new(false));
+    let worker_quit = Arc::new(AtomicBool::new(false));
+    let (tx, rx): (Sender<Action>, Receiver<Action>) = mpsc::channel();
+
+    let worker = {
+        let shared = Arc::clone(&shared);
+        let busy = Arc::clone(&busy);
+        let worker_quit = Arc::clone(&worker_quit);
+        let stop = Arc::clone(&stop);
+        let iface = interface.to_string();
+        std::thread::spawn(move || worker_loop(&iface, shared, busy, worker_quit, stop, rx))
+    };
+
+    // Wait briefly for the worker to publish its first snapshot.
     let mut terminal = setup_terminal()?;
-    let mut app = App::new(interface, Arc::clone(&stop));
-    let res = event_loop(&mut terminal, &mut app);
+    let res = ui_loop(&mut terminal, &shared, &busy, &tx, &worker_quit, &stop);
 
-    // Always restore the terminal and resume frozen processes, even on error.
-    app.teardown();
+    // Tell the worker to finish and clean up (resume frozen processes).
+    worker_quit.store(true, Ordering::SeqCst);
+    let _ = tx.send(Action::Quit); // unblock the worker if it's waiting
+    let _ = worker.join();
+
     restore_terminal(&mut terminal)?;
-
     if let Err(e) = res {
         eprintln!("error: {e}");
     }
-    let resumed = app.procmon.resume_all();
-    if resumed > 0 {
-        eprintln!("Resumed {resumed} frozen process(es) on exit.");
+    Ok(())
+}
+
+/// The worker thread: owns the App, processes actions + periodic refresh, and
+/// republishes the render snapshot after every change.
+fn worker_loop(
+    interface: &str,
+    shared: Arc<Mutex<Option<RenderState>>>,
+    busy: Arc<AtomicBool>,
+    worker_quit: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    rx: Receiver<Action>,
+) {
+    let mut app = App::new(interface, Arc::clone(&stop));
+    app.refresh();
+    publish(&shared, &app);
+
+    let refresh_every = Duration::from_millis(1500);
+    let mut last_refresh = Instant::now();
+
+    loop {
+        if worker_quit.load(Ordering::Relaxed) || app.should_quit || stop.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Drain any pending actions (each may block; that's fine off the UI thread).
+        match rx.recv_timeout(Duration::from_millis(120)) {
+            Ok(action) => {
+                let heavy = is_heavy(&action);
+                if heavy {
+                    busy.store(true, Ordering::SeqCst);
+                    publish(&shared, &app); // show the spinner immediately
+                }
+                app.apply_action(action);
+                if heavy {
+                    busy.store(false, Ordering::SeqCst);
+                }
+                publish(&shared, &app);
+                // Drain the rest without blocking.
+                loop {
+                    match rx.try_recv() {
+                        Ok(a) => {
+                            let h = is_heavy(&a);
+                            if h {
+                                busy.store(true, Ordering::SeqCst);
+                                publish(&shared, &app);
+                            }
+                            app.apply_action(a);
+                            if h {
+                                busy.store(false, Ordering::SeqCst);
+                            }
+                            publish(&shared, &app);
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => return,
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        // Periodic background refresh.
+        if last_refresh.elapsed() >= refresh_every {
+            app.refresh();
+            last_refresh = Instant::now();
+            publish(&shared, &app);
+        }
+    }
+
+    app.teardown();
+    let _ = app.procmon.resume_all();
+}
+
+/// Heavy actions get a spinner and an immediate pre-publish; light UI-only ones
+/// (tab switch, cursor move, visual deck) do not.
+fn is_heavy(a: &Action) -> bool {
+    use Action::*;
+    matches!(
+        a,
+        Doctor
+            | Boost
+            | SpeedFull
+            | SpeedQuick
+            | SpeedApple
+            | Hop2Repair
+            | Prewarm
+            | ZombieSync
+            | QuicFastpath
+            | Ipv6Guard
+            | FixExclamation
+            | SafeRenew
+            | LanSweep
+            | CaptiveGateway
+            | RoamRescan
+            | RootAuth
+            | MtuClamp
+            | Confirm
+            | PwKeychain
+            | PwSave
+    )
+}
+
+fn publish(shared: &Arc<Mutex<Option<RenderState>>>, app: &App) {
+    if let Ok(mut guard) = shared.lock() {
+        *guard = Some(app.build_render());
+    }
+}
+
+/// The UI thread: draw the latest snapshot, read keys, forward actions.
+fn ui_loop(
+    terminal: &mut Tui,
+    shared: &Arc<Mutex<Option<RenderState>>>,
+    busy: &Arc<AtomicBool>,
+    tx: &Sender<Action>,
+    worker_quit: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    let mut spin = 0usize;
+    let mut quitting = false;
+    loop {
+        if quitting || worker_quit.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Draw the latest published snapshot (if any yet).
+        let snap = shared.lock().ok().and_then(|g| g.clone());
+        if let Some(mut rs) = snap {
+            rs.busy = busy.load(Ordering::Relaxed);
+            spin = spin.wrapping_add(1);
+            terminal.draw(|f| ui::draw(f, &rs, spin))?;
+
+            // Read a key with a short timeout so the spinner animates.
+            if event::poll(Duration::from_millis(80))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        if let Some(action) = map_key(&rs, key.code, key.modifiers, &mut quitting) {
+                            let _ = tx.send(action);
+                        }
+                    }
+                }
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
     Ok(())
+}
+
+/// Translate a keypress into an `Action` to send to the worker. Returns `None`
+/// for keys that have no effect in the current context. Sets `quitting` on quit.
+fn map_key(
+    rs: &RenderState,
+    code: KeyCode,
+    mods: KeyModifiers,
+    quitting: &mut bool,
+) -> Option<Action> {
+    use Action::*;
+
+    // Password editor sub-mode captures most keys.
+    if rs.pw_edit_active {
+        return Some(match code {
+            KeyCode::Esc => PwCancel,
+            KeyCode::Enter => PwSave,
+            KeyCode::Tab => PwTab,
+            KeyCode::Char('k') if mods.contains(KeyModifiers::CONTROL) => PwKeychain,
+            KeyCode::Backspace => PwBackspace,
+            KeyCode::Char(c) => PwChar(c),
+            _ => return None,
+        });
+    }
+
+    let tab = rs.active_tab;
+    let a = match code {
+        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+            *quitting = true;
+            Quit
+        }
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => {
+            *quitting = true;
+            Quit
+        }
+        KeyCode::Char('1') => SwitchTab(Tab::Dashboard),
+        KeyCode::Char('2') => SwitchTab(Tab::Spectrum),
+        KeyCode::Char('3') => SwitchTab(Tab::Processes),
+        KeyCode::Char('4') => SwitchTab(Tab::Tuning),
+        KeyCode::Char('5') => SwitchTab(Tab::SpeedTest),
+        KeyCode::Tab => NextTab,
+        KeyCode::BackTab => PrevTab,
+        KeyCode::Char('j') | KeyCode::Down => {
+            if tab == Tab::Processes || tab == Tab::Tuning {
+                CursorDown
+            } else if code == KeyCode::Char('j') {
+                ExportTicket
+            } else {
+                return None;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => CursorUp,
+        KeyCode::Char('J') => ExportTicket,
+        KeyCode::Char('K') => CamPacer,
+        KeyCode::Char(' ') | KeyCode::Enter => Confirm,
+        KeyCode::Char('v') | KeyCode::Char('V') if tab == Tab::SpeedTest => SpeedQuick,
+        KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::SpeedTest => SpeedApple,
+        KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::Processes => LanSweep,
+        KeyCode::Char('u') | KeyCode::Char('U') if tab == Tab::Processes => ResumeAll,
+        KeyCode::Char('p') | KeyCode::Char('P') => CyclePreset,
+        KeyCode::Char('w') | KeyCode::Char('W') => ToggleWmm,
+        KeyCode::Char('x') | KeyCode::Char('X') => ToggleNoDelay,
+        KeyCode::Char('o') | KeyCode::Char('O') => Hop2Repair,
+        KeyCode::Char('i') | KeyCode::Char('I') => Prewarm,
+        KeyCode::Char('g') | KeyCode::Char('G') => Boost,
+        KeyCode::Char('l') | KeyCode::Char('L') => ZeroLag,
+        KeyCode::Char('z') | KeyCode::Char('Z') => ZombieSync,
+        KeyCode::Char('d') | KeyCode::Char('D') => Doctor,
+        KeyCode::Char('y') | KeyCode::Char('Y') => QuicFastpath,
+        KeyCode::Char('b') | KeyCode::Char('B') => Shape,
+        KeyCode::Char('h') | KeyCode::Char('H') => SafeRenew,
+        KeyCode::Char('f') | KeyCode::Char('F') => FixExclamation,
+        KeyCode::Char('6') => Ipv6Guard,
+        KeyCode::Char('t') | KeyCode::Char('T') => MtuClamp,
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            if tab == Tab::Tuning {
+                MacPrivacy
+            } else {
+                VisualNext
+            }
+        }
+        KeyCode::Char(']') => VisualNext,
+        KeyCode::Char('[') => VisualPrev,
+        KeyCode::Char('e') | KeyCode::Char('E') => PwOpen,
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if tab == Tab::Spectrum {
+                SweetSpot
+            } else {
+                RootAuth
+            }
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => AutoPilot,
+        KeyCode::Char('c') | KeyCode::Char('C') => CaptiveGateway,
+        KeyCode::Char('r') | KeyCode::Char('R') => RoamRescan,
+        _ => return None,
+    };
+    Some(a)
 }
 
 fn setup_terminal() -> io::Result<Tui> {
@@ -542,397 +811,4 @@ fn restore_terminal(terminal: &mut Tui) -> io::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
-}
-
-fn event_loop(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
-    let refresh_every = Duration::from_millis(1500);
-    let mut last_refresh = Instant::now() - refresh_every; // force an immediate refresh
-
-    loop {
-        if app.should_quit || app.signalled_to_stop() {
-            break;
-        }
-
-        if last_refresh.elapsed() >= refresh_every {
-            app.refresh();
-            last_refresh = Instant::now();
-        }
-
-        terminal.draw(|f| ui::draw(f, app))?;
-
-        // Poll with a short timeout so the UI stays responsive between refreshes.
-        if event::poll(Duration::from_millis(80))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if app.pw_edit_active {
-                        handle_pw_editor(app, key.code, key.modifiers);
-                    } else {
-                        handle_key(app, key.code, key.modifiers);
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Password-editor sub-mode: capture typed characters and save/connect.
-fn handle_pw_editor(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    match code {
-        KeyCode::Esc => {
-            app.pw_edit_active = false;
-            app.status_msg = "Wi-Fi Password editor closed.".into();
-        }
-        KeyCode::Enter => {
-            let target = app.pw_edit_ssid.clone();
-            let pw = app.pw_edit_buf.trim().to_string();
-            app.pw_edit_active = false;
-            app.status_msg = if pw.is_empty() {
-                app.profiles.set_wifi_password(&target, "");
-                format!("Cleared stored password for '{target}'.")
-            } else {
-                app.profiles.set_wifi_password(&target, &pw)
-            };
-            app.telemetry.wifi_password = app.profiles.get_wifi_password(&app.telemetry.ssid);
-        }
-        KeyCode::Tab => {
-            let mut saved = app.telemetry.saved_networks.clone();
-            let curr = app.telemetry.ssid.clone();
-            if !curr.is_empty() && !saved.contains(&curr) {
-                saved.insert(0, curr);
-            }
-            if !saved.is_empty() {
-                app.pw_edit_idx = (app.pw_edit_idx + 1) % saved.len();
-                app.pw_edit_ssid = saved[app.pw_edit_idx].clone();
-                app.pw_edit_buf = app.profiles.get_wifi_password(&app.pw_edit_ssid);
-            }
-        }
-        KeyCode::Char('k') if mods.contains(KeyModifiers::CONTROL) => {
-            let target = app.pw_edit_ssid.clone();
-            app.pw_edit_active = false;
-            app.status_msg = match app.profiles.fetch_keychain_password(&target) {
-                Some(pw) => format!("[OK] Synced password for '{target}' from macOS Keychain: {pw}"),
-                None => format!("[!] Keychain entry not found or cancelled for '{target}'. Press [E] to type it."),
-            };
-        }
-        KeyCode::Backspace => {
-            app.pw_edit_buf.pop();
-        }
-        KeyCode::Char(c) => {
-            app.pw_edit_buf.push(c);
-        }
-        _ => {}
-    }
-}
-
-fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    let tab = app.active_tab;
-    match code {
-        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => app.should_quit = true,
-        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
-
-        KeyCode::Char('1') => app.active_tab = Tab::Dashboard,
-        KeyCode::Char('2') => app.active_tab = Tab::Spectrum,
-        KeyCode::Char('3') => app.active_tab = Tab::Processes,
-        KeyCode::Char('4') => app.active_tab = Tab::Tuning,
-        KeyCode::Char('5') => app.active_tab = Tab::SpeedTest,
-        KeyCode::Tab => app.active_tab = app.active_tab.next(),
-        KeyCode::BackTab => app.active_tab = app.active_tab.prev(),
-
-        KeyCode::Char('j') | KeyCode::Down => {
-            if tab == Tab::Processes && !app.procmon.last.is_empty() {
-                app.proc_cursor = (app.proc_cursor + 1).min(app.procmon.last.len() - 1);
-            } else if tab == Tab::Tuning {
-                app.preset.cursor_idx = (app.preset.cursor_idx + 1) % 12;
-            } else if code == KeyCode::Char('j') {
-                export_ticket(app);
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if tab == Tab::Processes {
-                app.proc_cursor = app.proc_cursor.saturating_sub(1);
-            } else if tab == Tab::Tuning {
-                app.preset.cursor_idx = (app.preset.cursor_idx + 11) % 12;
-            } else {
-                app.status_msg = app.scope.toggle_cam_pacer();
-            }
-        }
-        KeyCode::Char('J') => export_ticket(app),
-        KeyCode::Char('K') => app.status_msg = app.scope.toggle_cam_pacer(),
-
-        KeyCode::Char(' ') | KeyCode::Enter => match tab {
-            Tab::Processes => {
-                if let Some(p) = app.procmon.last.get(app.proc_cursor).cloned() {
-                    app.status_msg = app.procmon.toggle_pause(p.pid, &p.name);
-                }
-            }
-            Tab::Tuning => toggle_tuning_control(app),
-            Tab::SpeedTest => {
-                let target = app
-                    .scope
-                    .isp_ip
-                    .parse()
-                    .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
-                app.status_msg = speedtest::run_full_suite(&mut app.speedtest, target, false);
-            }
-            _ => {}
-        },
-
-        KeyCode::Char('v') | KeyCode::Char('V') if tab == Tab::SpeedTest => {
-            let target = app
-                .scope
-                .isp_ip
-                .parse()
-                .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
-            app.status_msg = speedtest::run_full_suite(&mut app.speedtest, target, true);
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::SpeedTest => {
-            app.status_msg = speedtest::run_apple_network_quality(&mut app.speedtest);
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::Processes => {
-            let ip = app.telemetry.ipv4.clone();
-            let gw = app.telemetry.gateway.clone();
-            app.lan_data = app.lan_scanner.scan_lan(&ip, &gw, true);
-            app.status_msg = format!("[OK] LAN Sweep Complete: {}", app.lan_data.summary);
-        }
-        KeyCode::Char('u') | KeyCode::Char('U') if tab == Tab::Processes => {
-            let n = app.procmon.resume_all();
-            app.status_msg = format!("Resumed {n} frozen processes via SIGCONT.");
-        }
-
-        KeyCode::Char('p') | KeyCode::Char('P') => {
-            app.preset.cycle_preset();
-            app.status_msg = format!(
-                "Switched Smart Tuning Preset -> #{}",
-                app.preset.selected_preset_id
-            );
-        }
-        KeyCode::Char('w') | KeyCode::Char('W') => {
-            app.status_msg = app.kernel.toggle_wmm_vip_priority(None)
-        }
-        KeyCode::Char('x') | KeyCode::Char('X') => {
-            app.status_msg = app.kernel.toggle_ffxiv_tcp_nodelay(None)
-        }
-        KeyCode::Char('o') | KeyCode::Char('O') => {
-            let gw = app.telemetry.gateway.clone();
-            crate::core::hop2::refresh_gateway_arp(&gw);
-            app.kernel.toggle_ffxiv_tcp_nodelay(Some(true));
-            app.kernel.toggle_wmm_vip_priority(Some(true));
-            app.status_msg = "Ran 6-Stage Hop 2 Anti-Bloat & De-Jitter Repair.".into();
-        }
-        KeyCode::Char('i') | KeyCode::Char('I') => {
-            app.status_msg = app.kernel.prewarm_workload_edges()
-        }
-        KeyCode::Char('g') | KeyCode::Char('G') => {
-            app.profiles.set_zero_lag_mode(true);
-            app.scope.cam_pacer_active = true;
-            let (_, doc) = app.wan_doctor.run_auto_doctor(Some(&mut app.kernel), false);
-            let boost = {
-                let tel = app.telemetry.clone();
-                app.antilag
-                    .run_god_mode_boost(&tel, &app.dns, &mut app.kernel)
-            };
-            app.dns_results = app.dns.race_resolvers();
-            app.status_msg = format!("{boost} │ {doc}");
-        }
-        KeyCode::Char('l') | KeyCode::Char('L') => {
-            let mut tel = app.telemetry.clone();
-            let m = app.antilag.toggle_awdl(Some(&mut tel));
-            app.telemetry = tel;
-            app.profiles.set_zero_lag_mode(app.antilag.zero_lag_active);
-            app.status_msg = m;
-        }
-        KeyCode::Char('z') | KeyCode::Char('Z') => {
-            let (_, z) = app.wan_doctor.reap_zombie_sockets();
-            let s = app
-                .antilag
-                .toggle_sync_daemons(!app.antilag.sync_daemons_frozen);
-            app.status_msg = format!("{z} │ {s}");
-        }
-        KeyCode::Char('d') | KeyCode::Char('D') => {
-            let (_, doc) = app.wan_doctor.run_auto_doctor(Some(&mut app.kernel), false);
-            app.dns_results = app.dns.race_resolvers();
-            app.wan_snap = app.wan_doctor.get_snapshot();
-            app.status_msg = doc;
-        }
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            let (_, m) = app.wan_doctor.toggle_quic_fastpath(None);
-            app.status_msg = m;
-        }
-        KeyCode::Char('b') | KeyCode::Char('B') => {
-            if tab == Tab::Processes {
-                if let Some(p) = app.procmon.last.get(app.proc_cursor).cloned() {
-                    app.status_msg = app.shaper.toggle_throttle_pid(p.pid, &p.name, 8);
-                }
-            } else {
-                app.status_msg = "5GHz sibling lock requires networksetup association.".into();
-            }
-        }
-        KeyCode::Char('h') | KeyCode::Char('H') => {
-            crate::core::dns_engine::DnsEngine::flush_cache();
-            let iface = app.collector.interface.clone();
-            crate::core::antilag::AntiLagEngine::refresh_dhcp_and_routes(&iface);
-            app.status_msg =
-                "Refreshed DHCP lease & DNS cache safely (zero radio disruption).".into();
-        }
-        KeyCode::Char('f') | KeyCode::Char('F') => {
-            let (_, m) = app.wan_doctor.fix_macos_exclamation_mark();
-            app.status_msg = m;
-        }
-        KeyCode::Char('6') => {
-            let (_, m) = app.wan_doctor.toggle_ipv6_guard(None);
-            app.status_msg = m;
-        }
-        KeyCode::Char('t') | KeyCode::Char('T') => {
-            let new_mtu = if app.telemetry.mtu >= 1500 {
-                1492
-            } else {
-                1500
-            };
-            app.status_msg = app.kernel.set_optimal_mtu(new_mtu);
-        }
-        KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Char(']') => {
-            if tab == Tab::Tuning && matches!(code, KeyCode::Char('m') | KeyCode::Char('M')) {
-                app.status_msg = app.privacy.randomize_mac();
-            } else {
-                app.visual_mode = (app.visual_mode % 4) + 1;
-                app.status_msg = format!(
-                    "Switched Visual Telemetry Deck -> [{}]",
-                    visual_name(app.visual_mode)
-                );
-            }
-        }
-        KeyCode::Char('[') => {
-            app.visual_mode = if app.visual_mode == 1 {
-                4
-            } else {
-                app.visual_mode - 1
-            };
-            app.status_msg = format!(
-                "Switched Visual Telemetry Deck -> [{}]",
-                visual_name(app.visual_mode)
-            );
-        }
-        KeyCode::Char('e') | KeyCode::Char('E') => {
-            let mut curr = app.telemetry.ssid.clone();
-            if matches!(curr.as_str(), "Scanning..." | "Disconnected" | "") {
-                curr = app
-                    .telemetry
-                    .saved_networks
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "Wi-Fi".into());
-            }
-            app.pw_edit_ssid = curr.clone();
-            app.pw_edit_idx = 0;
-            app.pw_edit_buf = app.profiles.get_wifi_password(&curr);
-            app.pw_edit_active = true;
-        }
-        KeyCode::Char('s') | KeyCode::Char('S') => {
-            if tab == Tab::Spectrum {
-                let q = crate::core::acoustic_radar::calculate_quality_score(&app.telemetry);
-                app.status_msg = format!(
-                    "Sweet-Spot Locator: {} {} ({:.1} clicks/s) │ SNR {}dB MCS {}",
-                    q.meter, q.rating, q.click_hz, q.snr_db, q.mcs_index
-                );
-            } else {
-                app.status_msg = app.antilag.authorize_root_privileges();
-            }
-        }
-        KeyCode::Char('a') | KeyCode::Char('A') => {
-            let state = app.profiles.toggle_auto_pilot();
-            if state {
-                app.preset.selected_preset_id = 1;
-            }
-            app.status_msg = format!(
-                "Closed-Loop Smart Preset Auto-Adapt {}.",
-                if state { "ENABLED" } else { "MANUAL" }
-            );
-        }
-        KeyCode::Char('c') | KeyCode::Char('C') => {
-            let cap = app.captive.probe_portal(true);
-            if cap.captive {
-                app.status_msg = app.captive.breakout_captive_portal(Some(&app.dns));
-            } else {
-                app.router_status = app.router_bot.probe_ports();
-                app.status_msg = format!(
-                    "Gateway ({}): {} │ {}",
-                    app.router_status.ip, app.router_status.summary, cap.summary
-                );
-            }
-        }
-        KeyCode::Char('r') | KeyCode::Char('R') => {
-            app.refresh();
-            app.spectrum = crate::core::spectrum::analyze(&app.telemetry);
-            app.status_msg = "Smart BSSID Roam Evaluation & 5GHz/2.4GHz Rescan complete.".into();
-        }
-        _ => {}
-    }
-}
-
-fn visual_name(m: u8) -> &'static str {
-    match m {
-        1 => "1:TOPOLOGY PIPELINE DIAGRAM",
-        2 => "2:2D RF SIGNAL & SNR CHRONOGRAPH",
-        3 => "3:802.11 QAM CONSTELLATION & MIMO",
-        _ => "4:KERNEL TCP SOCKET & PORT MATRIX",
-    }
-}
-
-fn export_ticket(app: &mut App) {
-    let hist = app.telemetry.history_summary.clone();
-    let (_, msg) = crate::core::ticket::export_report(&app.telemetry, &app.scope_snap, Some(&hist));
-    app.status_msg = msg;
-}
-
-fn toggle_tuning_control(app: &mut App) {
-    let idx = app.preset.cursor_idx;
-    let controls = app.preset.get_tuning_controls(
-        &app.telemetry,
-        &app.kernel_state,
-        &app.wan_snap,
-        app.antilag.root_authorized,
-        app.antilag.sync_daemons_frozen,
-    );
-    let Some(ctrl) = controls.get(idx.min(controls.len().saturating_sub(1))) else {
-        return;
-    };
-    let id = ctrl.id;
-    app.status_msg = match id {
-        "wmm_vip" => app.kernel.toggle_wmm_vip_priority(None),
-        "cam_pacer" => app.scope.toggle_cam_pacer(),
-        "ffxiv_nodelay" => app.kernel.toggle_ffxiv_tcp_nodelay(None),
-        "buf_8mb" => app.kernel.toggle_8mb_streaming_buffers(None),
-        "wan_doctor" => {
-            app.wan_doctor
-                .run_auto_doctor(Some(&mut app.kernel), false)
-                .1
-        }
-        "ipv6_guard" => app.wan_doctor.toggle_ipv6_guard(None).1,
-        "quic_fastpath" => app.wan_doctor.toggle_quic_fastpath(None).1,
-        "zero_lag" => {
-            let mut tel = app.telemetry.clone();
-            let m = app.antilag.toggle_awdl(Some(&mut tel));
-            app.telemetry = tel;
-            m
-        }
-        "sync_freeze" => {
-            let (_, z) = app.wan_doctor.reap_zombie_sockets();
-            let s = app
-                .antilag
-                .toggle_sync_daemons(!app.antilag.sync_daemons_frozen);
-            format!("{z} │ {s}")
-        }
-        "band_5g" => "5GHz sibling lock requires networksetup association.".into(),
-        "mtu_clamp" => {
-            let new_mtu = if app.telemetry.mtu >= 1500 {
-                1492
-            } else {
-                1500
-            };
-            app.kernel.set_optimal_mtu(new_mtu)
-        }
-        "root_auth" => app.antilag.authorize_root_privileges(),
-        _ => "Module updated.".into(),
-    };
 }
