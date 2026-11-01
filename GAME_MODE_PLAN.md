@@ -83,3 +83,40 @@ IMPLEMENTATION NOTES
 
 VERIFY: clippy · fmt · test · release · no-panic · commit · push · show in NVIM.
 ================================================================================
+
+
+================================================================================
+  ✅ BUILT & PUSHED  (commit a73ccbb)
+================================================================================
+Automatic GAME MODE is live. Zero input required.
+
+HOW IT WORKS NOW:
+  • Every 3rd refresh tick, read-only `pgrep` scans for League / Riot /
+    Vanguard (vgc/vgk) / Valorant + common titles. (Mechanism verified on your
+    machine: pgrep -x correctly finds running procs, none now.)
+  • On detection → reverts risky kernel tweaks to macOS defaults, disables
+    AirDrop/AWDL (safe anti-jitter win), flushes DNS, snapshots MTU, LOCKS.
+  • While locked → every risky action (boost/doctor/sysctl toggles/MTU/root/
+    SIGSTOP/zombie-reap/DHCP-renew/auto-pilot/…) is refused with a
+    "🎮 GAME MODE — blocked (anti-cheat safe)" notice. Navigation, palette,
+    speed tests, read-only views still work.
+  • On game exit AND on wifi-tui quit → AirDrop restored, MTU restored, unlock.
+
+WHY THIS FIXES YOUR PROBLEM:
+  While Vanguard is loaded, wifi-tui physically cannot do the kernel/process
+  tampering that triggered your kick — and it keeps the system on clean
+  defaults, which also stops the client jank the lingering sysctl/MTU tweaks
+  were causing.
+
+HEADER shows a green "🎮 GAME MODE" badge when active.
+
+VERIFIED: clippy clean · fmt clean · 26 tests pass (3 new) · release builds ·
+no panic · pgrep detection confirmed on-device.
+
+NOTE ON PING: the big SAFE win is AirDrop/AWDL off (less radio time-slicing).
+The kernel "tricks" stay OFF during games on purpose — they are what got you
+flagged and they made your client janky. For lower ping, the remaining wins are
+router-side & safe: move the router off DFS Ch132 to Ch 36 or 149, and prefer
+5GHz close to the AP (or wired). Those are settings on the router, not system
+mutations, so they carry zero anti-cheat risk.
+================================================================================
