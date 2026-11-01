@@ -58,7 +58,7 @@ struct Cli {
     boost: bool,
 
     /// Run the 4-tier self-healing orchestrator and exit.
-    #[arg(long)]
+    #[arg(long, alias = "auto-heal")]
     orchestrate: bool,
 
     /// Install the background LaunchAgent daemon.
@@ -72,6 +72,58 @@ struct Cli {
     /// Print LaunchAgent daemon status.
     #[arg(long = "daemon-status")]
     daemon_status: bool,
+
+    /// Run the autonomous self-healing daemon loop in the foreground.
+    #[arg(long)]
+    daemon: bool,
+
+    /// Run the headless link-anomaly watchdog loop in the foreground.
+    #[arg(long)]
+    watchdog: bool,
+
+    /// Run the 6-stage Hop 2 anti-bloat repair and exit.
+    #[arg(long, alias = "repair-hop2")]
+    debloat: bool,
+
+    /// Run Path MTU discovery + MSS clamp and exit.
+    #[arg(long, alias = "check-mtu")]
+    pmtu: bool,
+
+    /// Diagnose non-Wi-Fi RF interference and exit.
+    #[arg(long = "rf-inference", alias = "detect-interference")]
+    rf_inference: bool,
+
+    /// Run the Wi-Fi security / evil-twin / ARP audit and exit.
+    #[arg(long = "security-guard", alias = "audit-security")]
+    security_guard: bool,
+
+    /// Query gateway UPnP WAN status (add --confirm to warm-reboot).
+    #[arg(long = "reboot-gateway", alias = "gateway-status")]
+    reboot_gateway: bool,
+
+    /// Confirm destructive actions such as gateway reboot.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Run the real-time acoustic sweet-spot radar locator and exit.
+    #[arg(long, alias = "radar-audio")]
+    sweetspot: bool,
+
+    /// Run a multi-stream speed + bufferbloat benchmark and exit.
+    #[arg(long)]
+    speedtest: bool,
+
+    /// Export a timestamped Markdown ISP diagnostic ticket and exit.
+    #[arg(long)]
+    export: bool,
+
+    /// Activate a named mission profile (meeting/gaming/stream/bloat/public/rescue) and exit.
+    #[arg(long, default_value = "")]
+    preset: String,
+
+    /// Target escalation tier (1..4) for --orchestrate.
+    #[arg(long)]
+    tier: Option<u8>,
 }
 
 fn main() -> io::Result<()> {
@@ -89,6 +141,20 @@ fn main() -> io::Result<()> {
         println!("{}", core::daemon::status());
         return Ok(());
     }
+    if cli.daemon {
+        std::process::exit(core::daemon::run_autonomous_daemon(
+            &cli.interface,
+            12,
+            None,
+        ));
+    }
+    if cli.watchdog {
+        std::process::exit(core::watchdog::run_watchdog_daemon(
+            &cli.interface,
+            20,
+            None,
+        ));
+    }
     if cli.doctor {
         return run_cli_doctor(&cli);
     }
@@ -98,10 +164,216 @@ fn main() -> io::Result<()> {
     if cli.orchestrate {
         return run_cli_orchestrate(&cli);
     }
+    if cli.debloat {
+        return run_cli_debloat(&cli);
+    }
+    if cli.pmtu {
+        return run_cli_pmtu(&cli);
+    }
+    if cli.rf_inference {
+        return run_cli_rf_inference(&cli);
+    }
+    if cli.security_guard {
+        return run_cli_security_guard(&cli);
+    }
+    if cli.reboot_gateway {
+        return run_cli_gateway(&cli);
+    }
+    if cli.sweetspot {
+        core::acoustic_radar::run_live_locator(&cli.interface, 20.0, true);
+        return Ok(());
+    }
+    if cli.speedtest {
+        return run_cli_speedtest(&cli);
+    }
+    if cli.export {
+        return run_cli_export(&cli);
+    }
+    if !cli.preset.is_empty() {
+        return run_cli_preset(&cli);
+    }
     if cli.status || cli.json {
         return run_oneshot(&cli);
     }
     run_tui(&cli.interface)
+}
+
+fn warm_scope(
+    interface: &str,
+) -> (
+    core::collector::Collector,
+    core::PingScope,
+    core::hops::ScopeSnapshot,
+    core::model::Telemetry,
+) {
+    let mut collector = core::collector::Collector::new(interface);
+    let mut scope = core::PingScope::new(interface);
+    let mut snap = scope.probe();
+    for _ in 0..2 {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        snap = scope.probe();
+    }
+    let tel = collector.collect(snap.avg_ms, snap.loss_pct);
+    (collector, scope, snap, tel)
+}
+
+fn run_cli_debloat(cli: &Cli) -> io::Result<()> {
+    let (_, _, snap, tel) = warm_scope(&cli.interface);
+    let anomaly = core::hop2::detect_anomaly(&snap);
+    let band_eff = core::hop2::evaluate_band_efficiency(&tel);
+    println!("// RUNNING WIFI COCKPIT // 6-STAGE HOP 2 ANTI-BLOAT & DE-JITTER ENGINE //");
+    println!("{}", "=".repeat(78));
+    println!("  Initial State : {}", anomaly.diagnosis);
+    println!("  RF Efficiency : {band_eff}");
+    core::hop2::refresh_gateway_arp(&tel.gateway);
+    let mut kernel = core::kernel_tuner::KernelTuner::new("Wi-Fi", &cli.interface);
+    kernel.toggle_ffxiv_tcp_nodelay(Some(true));
+    kernel.toggle_wmm_vip_priority(Some(true));
+    println!(
+        "  Result        : [OK] Hop 2 Anti-Bloat Healed (CAM + WMM + Fast-ACK + ARP refresh)."
+    );
+    Ok(())
+}
+
+fn run_cli_pmtu(cli: &Cli) -> io::Result<()> {
+    let doctor = core::pmtu::PmtuDoctor::new(&cli.interface);
+    println!("// RUNNING WIFI COCKPIT // PATH MTU DISCOVERY & BLACK HOLE DOCTOR //");
+    println!("{}", "=".repeat(78));
+    let diag = doctor.diagnose(None);
+    println!("  Interface MTU       : {} B", diag.interface_mtu);
+    println!("  Discovered Wire MTU : {} B", diag.wire_mtu);
+    println!("  Optimal TCP MSS     : {} B", diag.optimal_mss);
+    println!(
+        "  Black Hole Status   : {}",
+        if diag.is_blackhole {
+            "[!] SILENT BLACK HOLE DETECTED"
+        } else {
+            "[OK] Clean (No Black Hole)"
+        }
+    );
+    println!("  Diagnosis           : {}", diag.diagnosis);
+    println!("{}", "-".repeat(78));
+    let (_, msg) = doctor.auto_heal(None);
+    println!("  Action Result       : {msg}");
+    Ok(())
+}
+
+fn run_cli_rf_inference(cli: &Cli) -> io::Result<()> {
+    let (_, _, _, tel) = warm_scope(&cli.interface);
+    let res = core::rf_inference::run_full(&tel);
+    println!("// RUNNING WIFI COCKPIT // NON-WI-FI RF & MICROWAVE INFERENCE ENGINE //");
+    println!("{}", "=".repeat(78));
+    println!("  RF Health Score : {}/100", res.rf_health_score);
+    println!("  Airspace Status : {}", res.summary);
+    println!("  Action Guide    : {}", res.primary_advice);
+    Ok(())
+}
+
+fn run_cli_security_guard(cli: &Cli) -> io::Result<()> {
+    let (_, _, _, tel) = warm_scope(&cli.interface);
+    let mut guard = core::security_guard::SecurityGuard::new(&cli.interface);
+    let rep = guard.run_security_audit(&tel);
+    println!("// RUNNING WIFI COCKPIT // NETWORK SECURITY & ROGUE AP GUARD //");
+    println!("{}", "=".repeat(78));
+    println!("  Security Score  : {}/100", rep.security_score);
+    println!("  Threat Posture  : [{}]", rep.threat_level);
+    for t in &rep.threats {
+        println!("    [!] {t}");
+    }
+    for r in &rep.remediations {
+        println!("    -> {r}");
+    }
+    std::process::exit(if rep.threat_level == "CRITICAL" { 1 } else { 0 });
+}
+
+fn run_cli_gateway(cli: &Cli) -> io::Result<()> {
+    let mut rebooter = core::gateway::GatewayRebooter::new("");
+    let gw = rebooter.resolve_gateway_ip();
+    println!("// RUNNING WIFI COCKPIT // GATEWAY ADMINISTRATION & REBOOTER ({gw}) //");
+    println!("{}", "=".repeat(78));
+    println!("  {}", rebooter.get_wan_status());
+    if cli.confirm {
+        println!("  [!] Executing Warm Gateway Reboot via UPnP...");
+        let (ok, msg) = rebooter.reboot_gateway(true);
+        println!("  Result         : {msg}");
+        std::process::exit(if ok { 0 } else { 1 });
+    } else {
+        println!("  Tip: re-run with --reboot-gateway --confirm to warm-reboot.");
+    }
+    Ok(())
+}
+
+fn run_cli_speedtest(cli: &Cli) -> io::Result<()> {
+    let (_, scope, _, tel) = warm_scope(&cli.interface);
+    let target = scope
+        .isp_ip
+        .parse()
+        .unwrap_or(std::net::Ipv4Addr::new(1, 1, 1, 1));
+    let mut st = core::speedtest::SpeedtestState::default();
+    println!("// RUNNING WIFI COCKPIT // MULTI-STREAM SPEED & BUFFERBLOAT SUITE //");
+    let msg = core::speedtest::run_full_suite(&mut st, target, true);
+    let snap = core::speedtest::snapshot(&st, &tel);
+    println!("{msg}");
+    println!(
+        "  ▼ Download  : {} Mbps (Peak {})",
+        st.down_mbps, st.peak_down_mbps
+    );
+    println!(
+        "  ▲ Upload    : {} Mbps (Peak {})",
+        st.up_mbps, st.peak_up_mbps
+    );
+    println!(
+        "  Grade / RPM : {} │ {} RPM",
+        st.bufferbloat_grade, st.rpm_score
+    );
+    for (name, verdict, _) in &snap.workloads {
+        println!("  ▸ {name:<20}: {verdict}");
+    }
+    Ok(())
+}
+
+fn run_cli_export(cli: &Cli) -> io::Result<()> {
+    let (_, _, snap, tel) = warm_scope(&cli.interface);
+    let (_, msg) = core::ticket::export_report(&tel, &snap, Some(&tel.history_summary));
+    println!("{msg}");
+    Ok(())
+}
+
+fn run_cli_preset(cli: &Cli) -> io::Result<()> {
+    let id = core::preset_engine::PresetEngine::mission_to_preset(&cli.preset);
+    let defs = core::preset_engine::preset_definitions();
+    let def = defs.iter().find(|p| p.id == id).unwrap_or(&defs[1]);
+    println!(
+        "// APPLYING MISSION PROFILE: '{}' //",
+        cli.preset.to_uppercase()
+    );
+    println!("{}", "=".repeat(78));
+    // Apply the preset's concrete tuning via the engines it maps to.
+    let mut kernel = core::kernel_tuner::KernelTuner::new("Wi-Fi", &cli.interface);
+    let mut antilag = core::antilag::AntiLagEngine::new(&cli.interface);
+    match id {
+        2 | 7 => {
+            kernel.toggle_wmm_vip_priority(Some(true));
+            kernel.toggle_ffxiv_tcp_nodelay(Some(true));
+            antilag.toggle_sync_daemons(true);
+        }
+        3 => {
+            kernel.toggle_8mb_streaming_buffers(Some(true));
+            kernel.toggle_wmm_vip_priority(Some(true));
+            kernel.prewarm_workload_edges();
+        }
+        4 => {
+            antilag.toggle_sync_daemons(true);
+            kernel.toggle_8mb_streaming_buffers(Some(true));
+        }
+        6 => {
+            let mut doctor = core::wan_doctor::WanDoctor::new(&cli.interface, "Wi-Fi");
+            doctor.run_auto_doctor(Some(&mut kernel), false);
+        }
+        _ => {}
+    }
+    println!("  Status  : Activated {} [{}]", def.name, def.short);
+    Ok(())
 }
 
 fn run_cli_doctor(cli: &Cli) -> io::Result<()> {
@@ -137,7 +409,7 @@ fn run_cli_orchestrate(cli: &Cli) -> io::Result<()> {
     let mut orch = core::orchestrator::Orchestrator::new(&cli.interface, "Wi-Fi");
     println!("// RUNNING WIFI COCKPIT // 4-TIER AUTONOMOUS SELF-HEALING ORCHESTRATOR //");
     println!("{}", "=".repeat(78));
-    let res = orch.run(&tel, &snap, None);
+    let res = orch.run(&tel, &snap, cli.tier);
     println!("  {}", res.summary);
     for a in &res.actions {
         println!("    [+] {a}");

@@ -83,4 +83,71 @@ impl RouterBot {
             summary: summary.into(),
         }
     }
+
+    /// Attempt a gateway admin login (base64 password, generic endpoint).
+    /// Ported from router_bot.attempt_login.
+    pub fn attempt_login(&self, username: &str, password: &str) -> String {
+        use std::time::Duration;
+        let ip = self.resolve_ip();
+        if ip == "N/A" {
+            return "No active gateway to log into.".into();
+        }
+        let b64 = base64_encode(password.as_bytes());
+        let data = format!("userid={username}&password={b64}");
+        let url = format!("https://{ip}/activatesession.cmd?action=logon");
+        let out = super::cmd::run(
+            &[
+                "curl", "-k", "-s", "-m", "3", "-X", "POST", "-d", &data, &url,
+            ],
+            Duration::from_secs(4),
+        );
+        if out.stdout.is_empty() {
+            format!("Gateway {ip}:443 refused connection.")
+        } else if out.stdout.contains("Invalid User") || out.stdout.contains("Bad.html") {
+            format!("Gateway rejected credentials for '{username}'.")
+        } else {
+            format!("Authenticated to {ip} as '{username}'!")
+        }
+    }
+}
+
+/// Minimal RFC 4648 base64 (std has no encoder; avoids a dependency).
+fn base64_encode(input: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64_encode;
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"hunter2"), "aHVudGVyMg==");
+    }
 }

@@ -65,3 +65,41 @@ pub fn calculate_quality_score(tel: &Telemetry) -> QualityScore {
         mcs_index: tel.mcs_index,
     }
 }
+
+/// Live terminal sweet-spot locator with Geiger-style acoustic ticks (terminal
+/// bell). Ported from `run_live_locator`. Blocks for `duration_sec`.
+pub fn run_live_locator(interface: &str, duration_sec: f64, audio: bool) {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let mut collector = super::collector::Collector::new(interface);
+    let mut scope = super::PingScope::new(interface);
+    let end = Instant::now() + Duration::from_secs_f64(duration_sec);
+
+    println!("\n// ACOUSTIC SWEET-SPOT RADAR // MOVE YOUR LAPTOP TO FIND MAXIMUM RF //");
+    println!("{}", "=".repeat(76));
+    println!("  Press Ctrl+C to stop locator.\n");
+
+    let mut last_tick = Instant::now();
+    while Instant::now() < end {
+        let snap = scope.probe();
+        let tel = collector.collect(snap.avg_ms, snap.loss_pct);
+        let q = calculate_quality_score(&tel);
+
+        if last_tick.elapsed() >= Duration::from_millis(q.interval_ms.max(1) as u64) {
+            if audio {
+                print!("\x07"); // terminal bell = Geiger tick
+                let _ = std::io::stdout().flush();
+            }
+            last_tick = Instant::now();
+        }
+
+        print!(
+            "\r  {} │ {:<20} │ {}dBm SNR {}dB (MCS {}) │ {:4.1} clicks/s",
+            q.meter, q.rating, q.signal_dbm, q.snr_db, q.mcs_index, q.click_hz
+        );
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    println!("\n\n[OK] Sweet-Spot Radar scan stopped.");
+}

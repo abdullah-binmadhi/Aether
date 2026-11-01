@@ -38,6 +38,7 @@ pub mod spectrum;
 pub mod speedtest;
 pub mod ticket;
 pub mod wan_doctor;
+pub mod watchdog;
 
 use std::net::Ipv4Addr;
 use std::time::Duration;

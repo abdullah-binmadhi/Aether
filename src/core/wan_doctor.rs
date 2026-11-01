@@ -426,6 +426,47 @@ impl WanDoctor {
         }
     }
 
+    /// Promote Wi-Fi to the #1 network service order. Ported from fix_service_order.
+    pub fn fix_service_order(&mut self) -> (bool, String) {
+        let out = cmd::run(
+            &["networksetup", "-listallnetworkservices"],
+            Duration::from_millis(2000),
+        );
+        if !out.success {
+            return (false, "[!] Could not read network services".into());
+        }
+        let services: Vec<String> = out
+            .stdout
+            .lines()
+            .skip(1) // first line is the asterisk header
+            .map(|l| l.trim_start_matches('*').trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        if !services.iter().any(|s| s == &self.service) {
+            return (false, format!("[!] Service {} not found", self.service));
+        }
+        let mut ordered = vec![self.service.clone()];
+        for s in &services {
+            if s != &self.service {
+                ordered.push(s.clone());
+            }
+        }
+        let mut argv: Vec<&str> = vec!["networksetup", "-ordernetworkservices"];
+        for s in &ordered {
+            argv.push(s);
+        }
+        let res = cmd::run(&argv, Duration::from_millis(2500));
+        if res.success {
+            self.snap.service_order_optimal = true;
+            (
+                true,
+                "[OK] Promoted Wi-Fi to #1 Network Service Priority".into(),
+            )
+        } else {
+            (false, "[!] Service order update failed".into())
+        }
+    }
+
     pub fn fix_path_mtu(&mut self) -> (bool, String) {
         cmd::run(
             &["networksetup", "-setMTU", &self.interface, "1500"],
@@ -553,6 +594,7 @@ impl WanDoctor {
             actions.push("Safe-DHCP-Renew".into());
         }
         if !svc2 {
+            self.fix_service_order();
             actions.push("WiFi-Order:#1".into());
         }
 

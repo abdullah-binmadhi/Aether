@@ -2,6 +2,7 @@
 
 mod theme;
 mod views;
+pub mod widgets;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};

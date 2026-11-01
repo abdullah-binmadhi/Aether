@@ -51,10 +51,25 @@ wifi-tui --status        # RF telemetry, 4-hop matrix & health score
 wifi-tui --json          # full telemetry as JSON
 wifi-tui --doctor        # WAN & YouTube auto-doctor
 wifi-tui --boost         # god-mode boost pipeline
-wifi-tui --orchestrate   # 4-tier self-healing orchestrator
+wifi-tui --orchestrate [--tier N]   # 4-tier self-healing orchestrator
+wifi-tui --debloat       # 6-stage Hop 2 anti-bloat repair
+wifi-tui --pmtu          # Path MTU discovery + MSS clamp
+wifi-tui --rf-inference  # non-Wi-Fi RF interference diagnosis
+wifi-tui --security-guard           # evil-twin / ARP / DNS audit
+wifi-tui --reboot-gateway [--confirm]  # UPnP WAN status / warm reboot
+wifi-tui --speedtest     # multi-stream speed + bufferbloat
+wifi-tui --sweetspot     # real-time acoustic sweet-spot locator
+wifi-tui --export        # write ISP diagnostic markdown ticket
+wifi-tui --preset gaming # activate a mission profile
+wifi-tui --watchdog      # foreground link-anomaly watchdog loop
+wifi-tui --daemon        # foreground autonomous self-healing loop
 wifi-tui --daemon-install / --daemon-uninstall / --daemon-status
 wifi-tui --interface en0
 ```
+
+Aliases matching the Python CLI are accepted: `--auto-heal`, `--check-mtu`,
+`--detect-interference`, `--audit-security`, `--gateway-status`, `--radar-audio`,
+`--repair-hop2`.
 
 ## Keybindings (interactive)
 

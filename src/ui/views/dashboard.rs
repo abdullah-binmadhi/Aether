@@ -6,16 +6,62 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::ui::theme::{alert, amber, amber_bold, bar, good, sparkline};
+use crate::ui::theme::{alert, amber, amber_bold, bar, good, invert, sparkline};
 use crate::ui::titled_block;
 
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
-    let rows = Layout::vertical([Constraint::Min(8), Constraint::Length(7)]).split(area);
+    let rows = Layout::vertical([Constraint::Min(8), Constraint::Length(9)]).split(area);
     let cols =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
     render_pipe(f, app, cols[0]);
     render_flow(f, app, cols[1]);
-    render_analysis(f, app, rows[1]);
+    let bot =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+    render_analysis(f, app, bot[0]);
+    render_visual_deck(f, app, bot[1]);
+}
+
+fn render_visual_deck(f: &mut Frame, app: &App, area: Rect) {
+    use crate::ui::widgets::{deck_body, DECK_MODES};
+    let block = titled_block("VISUAL TELEMETRY DECK ([M] or [ / ] Switch View)");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 2 {
+        return;
+    }
+    let active = ((app.visual_mode.wrapping_sub(1)) % 4) + 1;
+    let mut pills = Vec::new();
+    for (id, label) in DECK_MODES {
+        let style = if id == active { invert() } else { amber_bold() };
+        pills.push(Span::styled(format!(" [{label}] "), style));
+    }
+    let body = deck_body(
+        app,
+        app.visual_mode,
+        inner.width as usize,
+        (inner.height as usize).saturating_sub(1),
+    );
+    let mut lines = vec![Line::from(pills)];
+    for (idx, l) in body.iter().enumerate() {
+        let style = if l.contains("[!]") || l.contains("╌✕") {
+            alert()
+        } else if idx == 0
+            || l.contains("INTERPRETATION:")
+            || l.contains("ANALYSIS:")
+            || l.contains("[OK]")
+            || l.contains("══▶")
+        {
+            if l.contains("[OK]") || l.contains("══▶") {
+                good()
+            } else {
+                amber_bold()
+            }
+        } else {
+            amber()
+        };
+        lines.push(Line::from(Span::styled(l.clone(), style)));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_analysis(f: &mut Frame, app: &App, area: Rect) {
