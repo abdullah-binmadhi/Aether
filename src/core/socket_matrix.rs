@@ -167,3 +167,33 @@ fn push(dq: &mut VecDeque<f64>, v: f64, cap: usize) {
     }
     dq.push_back(v);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_sockets_are_safe_to_chart() {
+        // The LIVE CONNECTIONS panel sizes each bar as count/total_active, where
+        // the renderer clamps total_active with .max(1). The raw default total is
+        // 0 (nothing sampled yet); verify the clamp keeps the divisor safe and
+        // that no category count is negative (bars use usize width maths).
+        let s = Sockets::default();
+        assert_eq!(s.total_active, 0);
+        assert!(s.total_active.max(1) >= 1); // renderer's clamp
+        for c in [
+            s.established,
+            s.https_443,
+            s.quic_udp_443,
+            s.dns_53,
+            s.time_wait,
+            s.syn_sent,
+            s.close_wait,
+            s.listen,
+            s.other_ports,
+        ] {
+            assert!(c >= 0);
+        }
+        assert!(!s.verdict.is_empty());
+    }
+}

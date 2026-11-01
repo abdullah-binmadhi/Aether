@@ -11,27 +11,32 @@ use crate::ui::theme::{alert, amber, amber_bold, bar, good, invert};
 use crate::ui::{draw_kpi_strip, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
-    // KPI strip · process table (sized to rows) · TOP TALKERS chart ·
-    // (selected detail + LAN map). The chart absorbs the space the short table
-    // used to leave empty.
+    // KPI strip (full width) · then a left column (table · top-talkers ·
+    // detail+LAN) beside a tall right column (LIVE CONNECTIONS socket panel).
+    let outer = Layout::vertical([Constraint::Length(4), Constraint::Min(10)]).split(area);
+    draw_kpi(f, rs, outer[0]);
+
+    let cols = Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(outer[1]);
+
+    // Left column.
     let n = rs.processes.len().max(1);
-    // Table height = header(2) + rows, capped so the chart + detail still fit.
     let table_h = (n as u16 + 2).clamp(6, 16);
-    let rows = Layout::vertical([
-        Constraint::Length(4),
+    let left = Layout::vertical([
         Constraint::Length(table_h),
         Constraint::Min(5),
         Constraint::Length(8),
     ])
-    .split(area);
-    draw_kpi(f, rs, rows[0]);
-    render_table(f, rs, rows[1]);
-    render_top_talkers(f, rs, rows[2]);
-
+    .split(cols[0]);
+    render_table(f, rs, left[0]);
+    render_top_talkers(f, rs, left[1]);
     let bot =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[3]);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(left[2]);
     render_detail(f, rs, bot[0]);
     render_lan(f, rs, bot[1]);
+
+    // Right column: tall LIVE CONNECTIONS socket panel.
+    render_connections(f, rs, cols[1]);
 }
 
 fn draw_kpi(f: &mut Frame, rs: &RenderState, area: Rect) {
@@ -285,6 +290,109 @@ fn render_lan(f: &mut Frame, rs: &RenderState, area: Rect) {
         )));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Right column: live kernel-socket breakdown — a must-have companion to the
+/// per-process table. Shows WHAT kind of connections are open right now and
+/// flags stalled handshakes. All from rs.socket_sample.sockets (already sampled).
+fn render_connections(f: &mut Frame, rs: &RenderState, area: Rect) {
+    let s = &rs.socket_sample.sockets;
+    let block = titled_block("LIVE CONNECTIONS (KERNEL SOCKETS)");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let w = inner.width as usize;
+    let total = s.total_active.max(1);
+
+    let clean = s.syn_sent < 4 && s.close_wait < 8;
+    let bar_w = w.saturating_sub(24).clamp(6, 40);
+    let bar = |count: i64| -> String {
+        let filled = ((count.max(0) as f64 / total as f64) * bar_w as f64).round() as usize;
+        let filled = filled.min(bar_w);
+        format!("{}{}", "█".repeat(filled), " ".repeat(bar_w - filled))
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("ACTIVE SOCKETS: {}", total),
+            amber_bold(),
+        )),
+        Line::from(Span::raw("")),
+    ];
+
+    // (label, count, alert_when_high) rows.
+    let rows: [(&str, i64, bool); 6] = [
+        ("ESTABLISHED", s.established, false),
+        ("HTTPS :443", s.https_443, false),
+        ("UDP/QUIC", s.quic_udp_443, false),
+        ("DNS 53/853", s.dns_53, false),
+        ("TIME_WAIT", s.time_wait, false),
+        ("SYN/CLOSE_W", s.syn_sent + s.close_wait, true),
+    ];
+    for (label, count, alert_high) in rows {
+        let style = if alert_high && count > 0 && !clean {
+            alert()
+        } else {
+            amber()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{:<11} {} {:>3}", label, bar(count), count),
+            style,
+        )));
+    }
+
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(Span::styled(
+        format!("LISTEN sockets : {}", s.listen),
+        amber(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("Other app ports: {}", s.other_ports),
+        amber(),
+    )));
+    lines.push(Line::from(Span::raw("")));
+
+    // Verdict (wrapped) in health colour.
+    let vstyle = if clean { good() } else { alert() };
+    for l in wrap_text(&s.verdict, w) {
+        lines.push(Line::from(Span::styled(l, vstyle)));
+    }
+
+    // Interactive hint when sockets are draining/stalled.
+    if !clean {
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            "→ Press [Z] to reap zombie sockets",
+            amber_bold(),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Minimal greedy word-wrap for a single paragraph.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(10);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let cand = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
+        if cand.chars().count() <= width {
+            cur = cand;
+        } else {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur = word.to_string();
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn truncate(s: &str, max: usize) -> String {
