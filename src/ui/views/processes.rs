@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::render::RenderState;
 use crate::ui::theme::{alert, amber, amber_bold, bar, good, invert};
+use crate::ui::widgets::score_meter;
 use crate::ui::{draw_kpi_strip, titled_block, Kpi};
 
 pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
@@ -364,6 +365,77 @@ fn render_connections(f: &mut Frame, rs: &RenderState, area: Rect) {
             "→ Press [Z] to reap zombie sockets",
             amber_bold(),
         )));
+    }
+
+    // ── Second feature: TRAFFIC ENCRYPTION POSTURE ──
+    // Fills the lower half with a genuinely useful read on how much live app
+    // traffic is encrypted (TLS/QUIC/DoT) vs plaintext/other — all from the
+    // same socket counts, no new cost.
+    let encrypted = s.https_443 + s.quic_udp_443 + s.dns_53;
+    let other = s.other_ports.max(0);
+    let denom = (encrypted + other).max(1);
+    let enc_pct = ((encrypted as f64 / denom as f64) * 100.0).round() as i64;
+    if (inner.height as usize) > lines.len() + 6 {
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            "── TRAFFIC ENCRYPTION POSTURE ──",
+            amber_bold(),
+        )));
+        let enc_style = if enc_pct >= 90 {
+            good()
+        } else if enc_pct >= 60 {
+            amber_bold()
+        } else {
+            alert()
+        };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{}  {}%",
+                score_meter(enc_pct, w.saturating_sub(10).clamp(8, 36)),
+                enc_pct
+            ),
+            enc_style,
+        )));
+        // Protocol mix mini bar-chart (each ∝ encrypted+other total).
+        let mix_w = w.saturating_sub(18).clamp(6, 30);
+        let mixbar = |c: i64| -> String {
+            let fill = ((c.max(0) as f64 / denom as f64) * mix_w as f64).round() as usize;
+            format!(
+                "{}{}",
+                "█".repeat(fill.min(mix_w)),
+                " ".repeat(mix_w - fill.min(mix_w))
+            )
+        };
+        lines.push(Line::from(Span::styled(
+            format!("HTTPS/TLS {} {:>3}", mixbar(s.https_443), s.https_443),
+            good(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("QUIC/UDP  {} {:>3}", mixbar(s.quic_udp_443), s.quic_udp_443),
+            good(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("DNS (DoT) {} {:>3}", mixbar(s.dns_53), s.dns_53),
+            amber(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("PLAINTEXT {} {:>3}", mixbar(other), other),
+            if other > 0 { alert() } else { amber() },
+        )));
+        let read = if other == 0 {
+            "All app streams on TLS/QUIC — safe on public Wi-Fi.".to_string()
+        } else {
+            format!(
+                "{} plaintext stream(s) — avoid logins on open networks.",
+                other
+            )
+        };
+        for l in wrap_text(&read, w) {
+            lines.push(Line::from(Span::styled(
+                l,
+                if other == 0 { good() } else { alert() },
+            )));
+        }
     }
 
     f.render_widget(Paragraph::new(lines), inner);

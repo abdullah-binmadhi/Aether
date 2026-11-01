@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::render::RenderState;
-use crate::ui::theme::{alert, amber, amber_bold, good, score_color};
+use crate::ui::theme::{alert, amber, amber_bold, good, score_color, sparkline};
 use crate::ui::widgets::{hbar_row, render_2d_vertical_graph};
 use crate::ui::{draw_kpi_strip, grid, titled_block, Kpi};
 
@@ -114,6 +114,48 @@ fn render_rf_gauges(f: &mut Frame, rs: &RenderState, area: Rect) {
         ),
         if tel.awdl_active { amber() } else { good() },
     )));
+
+    // Fill the rest of the panel with a tall signal-over-time graph + SNR/Retry
+    // sparklines, sized from the real leftover height so it always fits.
+    let used = lines.len();
+    let leftover = (inner.height as usize).saturating_sub(used + 2);
+    if leftover >= 3 {
+        let ss = &rs.socket_sample;
+        let sig_hist = if ss.signal_history.is_empty() {
+            vec![tel.signal_dbm as f64]
+        } else {
+            ss.signal_history.clone()
+        };
+        lines.push(Line::from(Span::styled(
+            "── SIGNAL OVER TIME ──",
+            amber_bold(),
+        )));
+        let gh = leftover.saturating_sub(2).max(2);
+        for g in render_2d_vertical_graph(&sig_hist, gh, inner.width as usize, -90.0, -35.0, "d") {
+            lines.push(Line::from(Span::styled(g, amber())));
+        }
+        let sw = (inner.width as usize).saturating_sub(16).max(10);
+        lines.push(Line::from(Span::styled(
+            format!(
+                "SNR   {} {}dB",
+                sparkline(&ss.snr_history, sw, 5.0),
+                tel.snr_db
+            ),
+            good(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "RETRY {} {:.1}%",
+                sparkline(&ss.retry_history, sw, 0.0),
+                tel.tx_retry_pct
+            ),
+            if tel.tx_retry_pct > 8.0 {
+                alert()
+            } else {
+                amber()
+            },
+        )));
+    }
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -121,7 +163,6 @@ fn render_rf_gauges(f: &mut Frame, rs: &RenderState, area: Rect) {
 /// has an obvious visible effect on Overview:
 ///   1 = LATENCY (RTT)   2 = DOWNLOAD   3 = UPLOAD   4 = COMBINED
 fn render_oscilloscope(f: &mut Frame, rs: &RenderState, area: Rect) {
-    use crate::ui::theme::sparkline;
     let mode = ((rs.visual_mode.wrapping_sub(1)) % 4) + 1;
     let (title, series, floor, max, unit, scolor): (&str, &[f64], f64, f64, &str, _) = match mode {
         2 => (
@@ -244,15 +285,38 @@ fn render_hop_bars(f: &mut Frame, rs: &RenderState, area: Rect) {
             style,
         )));
     }
-    lines.push(Line::from(Span::raw("")));
+
+    // Verdict text (wrapped) — compute now so we can reserve its rows and give
+    // the rest of the panel to a tall RTT-over-time graph.
     let vstyle = if rs.scope_fault.starts_with("[OK]") {
         good()
     } else {
         alert()
     };
-    // Word-wrap the verdict so it never clips at the right edge.
-    lines.push(Line::from(Span::styled("VERDICT:", vstyle)));
-    for l in wrap_text(&rs.scope_fault, w) {
+    let verdict_lines: Vec<String> = {
+        let mut v = vec!["VERDICT:".to_string()];
+        v.extend(wrap_text(&rs.scope_fault, w));
+        v
+    };
+
+    // Tall latency-over-time graph fills the gap between the hop bars and the
+    // verdict, sized from the real leftover height so nothing is clipped.
+    let used = lines.len();
+    let reserved = verdict_lines.len() + 2; // spacer + header + verdict block
+    let leftover = (inner.height as usize).saturating_sub(used + reserved);
+    if leftover >= 3 {
+        lines.push(Line::from(Span::styled(
+            "── LATENCY OVER TIME ──",
+            amber_bold(),
+        )));
+        let gh = leftover.saturating_sub(1).max(2);
+        for g in render_2d_vertical_graph(&rs.scope_rtt_history, gh, w, 0.0, 50.0, "m") {
+            lines.push(Line::from(Span::styled(g, amber())));
+        }
+    }
+
+    lines.push(Line::from(Span::raw("")));
+    for l in verdict_lines {
         lines.push(Line::from(Span::styled(l, vstyle)));
     }
     f.render_widget(Paragraph::new(lines), inner);
