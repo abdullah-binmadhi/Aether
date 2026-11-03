@@ -274,6 +274,7 @@ pub fn run_full_suite(shared: &Shared, ping_target: Ipv4Addr, quick: bool) -> St
     );
     for mut p in procs {
         let _ = p.kill();
+        let _ = p.wait();
     }
     if !dl.is_empty() {
         let mut sorted = dl.clone();
@@ -312,6 +313,7 @@ pub fn run_full_suite(shared: &Shared, ping_target: Ipv4Addr, quick: bool) -> St
     );
     for mut p in up_procs {
         let _ = p.kill();
+        let _ = p.wait();
     }
     if !ul.is_empty() {
         let mut sorted = ul.clone();

@@ -46,16 +46,20 @@ pub enum Tab {
     Processes = 3,
     Tuning = 4,
     SpeedTest = 5,
+    Device = 6,
+    Maintenance = 7,
 }
 
 impl Tab {
-    pub fn all() -> [Tab; 5] {
+    pub fn all() -> [Tab; 7] {
         [
             Tab::Dashboard,
             Tab::Spectrum,
             Tab::Processes,
             Tab::Tuning,
             Tab::SpeedTest,
+            Tab::Device,
+            Tab::Maintenance,
         ]
     }
     pub fn short(self, w: u16) -> &'static str {
@@ -66,16 +70,22 @@ impl Tab {
             (Tab::Processes, 122..) => "[3:FIREWALL]",
             (Tab::Tuning, 122..) => "[4:TUNING]",
             (Tab::SpeedTest, 122..) => "[5:SPEEDTEST]",
+            (Tab::Device, 122..) => "[6:DEVICE]",
+            (Tab::Maintenance, 122..) => "[7:CLEAN&OPT]",
             (Tab::Dashboard, 96..) => "[1:COCK]",
             (Tab::Spectrum, 96..) => "[2:SPEC]",
             (Tab::Processes, 96..) => "[3:FIRE]",
             (Tab::Tuning, 96..) => "[4:TUNE]",
             (Tab::SpeedTest, 96..) => "[5:SPEED]",
+            (Tab::Device, 96..) => "[6:DEV]",
+            (Tab::Maintenance, 96..) => "[7:OPT]",
             (Tab::Dashboard, _) => "[1:CKP]",
             (Tab::Spectrum, _) => "[2:SPC]",
             (Tab::Processes, _) => "[3:FWL]",
             (Tab::Tuning, _) => "[4:TUN]",
             (Tab::SpeedTest, _) => "[5:SPD]",
+            (Tab::Device, _) => "[6:DEV]",
+            (Tab::Maintenance, _) => "[7:OPT]",
         }
     }
     pub fn next(self) -> Tab {
@@ -84,16 +94,20 @@ impl Tab {
             Tab::Spectrum => Tab::Processes,
             Tab::Processes => Tab::Tuning,
             Tab::Tuning => Tab::SpeedTest,
-            Tab::SpeedTest => Tab::Dashboard,
+            Tab::SpeedTest => Tab::Device,
+            Tab::Device => Tab::Maintenance,
+            Tab::Maintenance => Tab::Dashboard,
         }
     }
     pub fn prev(self) -> Tab {
         match self {
-            Tab::Dashboard => Tab::SpeedTest,
+            Tab::Dashboard => Tab::Maintenance,
             Tab::Spectrum => Tab::Dashboard,
             Tab::Processes => Tab::Spectrum,
             Tab::Tuning => Tab::Processes,
             Tab::SpeedTest => Tab::Tuning,
+            Tab::Device => Tab::SpeedTest,
+            Tab::Maintenance => Tab::Device,
         }
     }
 
@@ -104,8 +118,10 @@ impl Tab {
             Tab::Dashboard => ("◉", "OVERVIEW", 1),
             Tab::Spectrum => ("◈", "AIRSPACE", 2),
             Tab::Processes => ("◈", "PROCESSES", 3),
-            Tab::Tuning => ("⚙", "TUNE & FIX", 4),
-            Tab::SpeedTest => ("⚡", "SPEED TEST", 5),
+            Tab::Tuning => ("◆", "TUNE & FIX", 4),
+            Tab::SpeedTest => ("▲", "SPEED TEST", 5),
+            Tab::Device => ("⊞", "DEVICE INFO", 6),
+            Tab::Maintenance => ("◧", "CLEAN & OPT", 7),
         }
     }
 }
@@ -133,6 +149,9 @@ pub struct App {
     pub router_bot: RouterBot,
     pub orchestrator: Orchestrator,
     pub preset: PresetEngine,
+    pub device_collector: crate::core::device_info::DeviceCollector,
+    pub device_info: crate::core::device_info::DeviceInfo,
+    pub maintenance: crate::core::maintenance::MaintenanceEngine,
     /// Shared so a background speedtest thread can update it live while the
     /// worker keeps publishing snapshots (that's what animates the UI).
     pub speedtest: std::sync::Arc<std::sync::Mutex<SpeedtestState>>,
@@ -221,6 +240,9 @@ impl App {
         let arp_info = privacy.check_arp_integrity(&telemetry.gateway);
         let router_bot = RouterBot::new(&scope.gateway_ip);
         let router_status = router_bot.probe_ports();
+        let mut device_collector = crate::core::device_info::DeviceCollector::new();
+        let device_info = device_collector.sample(interface);
+        let maintenance = crate::core::maintenance::MaintenanceEngine::new();
 
         App {
             collector,
@@ -244,6 +266,9 @@ impl App {
             router_bot,
             orchestrator: Orchestrator::new(interface, "Wi-Fi"),
             preset: PresetEngine::new(),
+            device_collector,
+            device_info,
+            maintenance,
             speedtest: std::sync::Arc::new(std::sync::Mutex::new(SpeedtestState::default())),
             telemetry,
             scope_snap,
@@ -323,6 +348,12 @@ impl App {
             } else {
                 self.proc_cursor.min(n - 1)
             };
+        }
+        if self.active_tab == Tab::Device || self.tick % 4 == 0 {
+            self.device_info = self.device_collector.sample(&self.collector.interface);
+        }
+        if self.active_tab == Tab::Maintenance && self.tick % 6 == 0 {
+            self.maintenance.rescan();
         }
 
         // Automatic Game Mode: detect on a light cadence (pgrep is cheap but we
@@ -807,6 +838,9 @@ impl App {
             },
             game_mode_active: self.game_mode.active(),
             game_name: self.game_mode.game_name().to_string(),
+            device: self.device_info.clone(),
+            maintenance: self.maintenance.snapshot.clone(),
+            active_theme_name: crate::ui::theme::theme_name().to_string(),
         }
     }
 
@@ -853,6 +887,8 @@ impl App {
             CursorDown => {
                 if tab == Tab::Processes && !self.procmon.last.is_empty() {
                     self.proc_cursor = (self.proc_cursor + 1).min(self.procmon.last.len() - 1);
+                } else if tab == Tab::Maintenance {
+                    self.maintenance.cursor_down();
                 } else if tab == Tab::Tuning {
                     let rows = self.build_tune_rows();
                     let sel = App::tune_selectable(&rows);
@@ -865,6 +901,8 @@ impl App {
             CursorUp => {
                 if tab == Tab::Processes {
                     self.proc_cursor = self.proc_cursor.saturating_sub(1);
+                } else if tab == Tab::Maintenance {
+                    self.maintenance.cursor_up();
                 } else if tab == Tab::Tuning {
                     let rows = self.build_tune_rows();
                     let sel = App::tune_selectable(&rows);
@@ -1319,6 +1357,69 @@ impl App {
                     None => format!("[!] Keychain entry not found or cancelled for '{target}'. Press [E] to type it."),
                 };
             }
+            ToggleMascot => {
+                self.device_collector.mascot_visible = !self.device_collector.mascot_visible;
+                self.device_info.mascot_visible = self.device_collector.mascot_visible;
+                self.status_msg = if self.device_collector.mascot_visible {
+                    "ASCII mascot: visible (press C to hide)".into()
+                } else {
+                    "ASCII mascot: hidden (press C to show)".into()
+                };
+            }
+            RefreshHardware => {
+                self.device_info = self.device_collector.sample(&self.collector.interface);
+                self.status_msg = "Device hardware metrics re-sampled".into();
+            }
+            OptRamOnly => {
+                self.status_msg = self.maintenance.execute_ram_purge();
+            }
+            OptSsdOnly => {
+                self.status_msg = self.maintenance.execute_ssd_clean();
+            }
+            OptAll => {
+                let r = self.maintenance.execute_ram_purge();
+                let s = self.maintenance.execute_ssd_clean();
+                self.status_msg = format!("{r} │ {s}");
+            }
+            CycleSafetyTier => {
+                let next_lvl = match self.maintenance.active_safety_level {
+                    crate::core::maintenance::SafetyLevel::Level1Safe => {
+                        crate::core::maintenance::SafetyLevel::Level2Balanced
+                    }
+                    crate::core::maintenance::SafetyLevel::Level2Balanced => {
+                        crate::core::maintenance::SafetyLevel::Level3DeepUninstaller
+                    }
+                    crate::core::maintenance::SafetyLevel::Level3DeepUninstaller => {
+                        crate::core::maintenance::SafetyLevel::Level1Safe
+                    }
+                };
+                self.maintenance.active_safety_level = next_lvl;
+                self.status_msg = format!("Safety Tier changed -> [{}]", next_lvl.label());
+                self.maintenance.rescan();
+            }
+            CycleTheme => {
+                let name = crate::ui::theme::cycle_theme();
+                self.status_msg = format!("Active Theme -> [{name}]");
+            }
+            UninstallSelectedApp => match self.maintenance.uninstall_selected_app() {
+                Ok(msg) => self.status_msg = msg,
+                Err(e) => self.status_msg = format!("[!] {e}"),
+            },
+            ToggleMaintenanceTarget(idx) => {
+                if idx < self.maintenance.target_checks.len() {
+                    self.maintenance.target_checks[idx] = !self.maintenance.target_checks[idx];
+                    self.maintenance.rescan();
+                }
+            }
+            MaintenanceToggleFocus => {
+                self.maintenance.toggle_focus();
+                let f_str = if self.maintenance.active_focus == 0 {
+                    "Focused: Interactive Checklist & Safety Tier"
+                } else {
+                    "Focused: App Inventory & Leftovers"
+                };
+                self.status_msg = f_str.into();
+            }
         }
     }
 
@@ -1330,6 +1431,15 @@ impl App {
                 }
             }
             Tab::Tuning => self.run_selected_tune_row(),
+            Tab::Maintenance => {
+                if let Some(msg) = self.maintenance.toggle_checklist_item() {
+                    self.status_msg = msg;
+                } else {
+                    let r = self.maintenance.execute_ram_purge();
+                    let s = self.maintenance.execute_ssd_clean();
+                    self.status_msg = format!("{r} │ {s}");
+                }
+            }
             Tab::SpeedTest => {
                 let target = self
                     .scope
@@ -1453,6 +1563,18 @@ pub fn palette_catalog() -> Vec<(&'static str, &'static str)> {
             "Root Authorization",
             "Install passwordless sudoers for kernel tuning",
         ),
+        (
+            "Cycle Color Theme",
+            "Switch between 10 high-contrast themes (Amber, Neon, Tokyo, etc.)",
+        ),
+        (
+            "Purge Inactive RAM",
+            "Zero-touch safe inactive Mach VM cache flush",
+        ),
+        (
+            "Thin APFS Snapshots",
+            "Reclaim multi-GB local Time Machine snapshots",
+        ),
     ]
 }
 
@@ -1484,6 +1606,9 @@ pub fn palette_action(idx: usize) -> Option<Action> {
         21 => SpeedQuick,
         22 => SpeedApple,
         23 => RootAuth,
+        24 => CycleTheme,
+        25 => OptRamOnly,
+        26 => OptSsdOnly,
         _ => return None,
     })
 }
@@ -1625,6 +1750,18 @@ pub enum Action {
     PaletteDown,
     PaletteConfirm,
     PaletteToggleBuffers,
+    // Device tab actions.
+    ToggleMascot,
+    RefreshHardware,
+    // Maintenance & Theme actions.
+    OptRamOnly,
+    OptSsdOnly,
+    OptAll,
+    CycleSafetyTier,
+    CycleTheme,
+    UninstallSelectedApp,
+    ToggleMaintenanceTarget(usize),
+    MaintenanceToggleFocus,
 }
 
 #[cfg(test)]
@@ -1710,5 +1847,35 @@ mod perf_tests {
             app.has_bg_inflight(),
             "Doctor should run again once Game Mode is off"
         );
+    }
+
+    #[test]
+    fn tab_device_navigation_and_mascot() {
+        assert_eq!(Tab::all().len(), 7);
+        assert_eq!(Tab::SpeedTest.next(), Tab::Device);
+        assert_eq!(Tab::Device.next(), Tab::Maintenance);
+        assert_eq!(Tab::Maintenance.next(), Tab::Dashboard);
+        assert_eq!(Tab::Dashboard.prev(), Tab::Maintenance);
+        assert_eq!(Tab::Maintenance.prev(), Tab::Device);
+        assert_eq!(Tab::Device.prev(), Tab::SpeedTest);
+
+        let mut app = App::new("en0", Arc::new(AtomicBool::new(false)));
+        app.apply_action(Action::SwitchTab(Tab::Device));
+        assert_eq!(app.active_tab, Tab::Device);
+
+        app.apply_action(Action::SwitchTab(Tab::Maintenance));
+        assert_eq!(app.active_tab, Tab::Maintenance);
+
+        let initial_mascot = app.device_collector.mascot_visible;
+        app.apply_action(Action::ToggleMascot);
+        assert_eq!(app.device_collector.mascot_visible, !initial_mascot);
+
+        app.apply_action(Action::CycleTheme);
+        assert!(app.status_msg.contains("Active Theme"));
+
+        let rs = app.build_render();
+        assert_eq!(rs.active_tab, Tab::Maintenance);
+        assert_eq!(rs.device.mascot_visible, !initial_mascot);
+        assert!(!rs.active_theme_name.is_empty());
     }
 }

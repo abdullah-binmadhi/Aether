@@ -204,7 +204,7 @@ impl AntiLagEngine {
 
         let _ = Band::Band5GHz;
         format!(
-            "⚡ 10X DYNAMIC BOOST ACTIVATED ON [{curr_ssid} ({})]:\n   {}",
+            "◆ 10X DYNAMIC BOOST ACTIVATED ON [{curr_ssid} ({})]:\n   {}",
             band.label(),
             steps.join(" │ ")
         )

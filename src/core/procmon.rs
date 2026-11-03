@@ -10,7 +10,26 @@
 
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Instant;
+
+static GLOBAL_PAUSED: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
+
+/// Resume every frozen process across the entire application lifetime.
+/// Safe to call from signal handlers, exit handlers, or panic hooks.
+pub fn resume_all_global() -> usize {
+    let mut count = 0;
+    if let Ok(mut guard) = GLOBAL_PAUSED.lock() {
+        if let Some(set) = guard.as_mut() {
+            for pid in std::mem::take(set) {
+                if send_signal(pid, libc_sigcont()).is_ok() {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
 
 /// System/terminal processes that must never be frozen.
 pub const PROTECTED: &[&str] = &[
@@ -163,6 +182,11 @@ impl ProcMonitor {
             match send_signal(pid, libc_sigcont()) {
                 Ok(()) => {
                     self.paused_pids.remove(&pid);
+                    if let Ok(mut guard) = GLOBAL_PAUSED.lock() {
+                        if let Some(set) = guard.as_mut() {
+                            set.remove(&pid);
+                        }
+                    }
                     format!("Resumed {name} (PID {pid}).")
                 }
                 Err(e) => format!("Failed to resume PID {pid}: {e}"),
@@ -171,6 +195,9 @@ impl ProcMonitor {
             match send_signal(pid, libc_sigstop()) {
                 Ok(()) => {
                     self.paused_pids.insert(pid);
+                    if let Ok(mut guard) = GLOBAL_PAUSED.lock() {
+                        guard.get_or_insert_with(HashSet::new).insert(pid);
+                    }
                     format!("Paused bandwidth hog {name} (PID {pid}) via SIGSTOP.")
                 }
                 Err(e) => format!("Failed to pause PID {pid}: {e}"),
@@ -180,13 +207,8 @@ impl ProcMonitor {
 
     /// Resume every frozen process. Called on quit AND from the signal handler.
     pub fn resume_all(&mut self) -> usize {
-        let mut count = 0;
-        for pid in std::mem::take(&mut self.paused_pids) {
-            if send_signal(pid, libc_sigcont()).is_ok() {
-                count += 1;
-            }
-        }
-        count
+        self.paused_pids.clear();
+        resume_all_global()
     }
 }
 

@@ -11,7 +11,7 @@
 //!   │          │ CONTEXT FOOTER (status + per-page keys)     │
 //!   └──────────┴───────────────────────────────────────────┘
 
-mod theme;
+pub mod theme;
 mod views;
 pub mod widgets;
 
@@ -57,6 +57,8 @@ pub fn draw(f: &mut Frame, rs: &RenderState, spin: usize) {
         Tab::Processes => views::processes::render(f, rs, right[1]),
         Tab::Tuning => views::optimizer::render(f, rs, right[1]),
         Tab::SpeedTest => views::speedtest::render(f, rs, right[1]),
+        Tab::Device => views::device::render(f, rs, right[1]),
+        Tab::Maintenance => views::maintenance::render(f, rs, right[1]),
     }
     draw_context_footer(f, rs, right[2], spin);
 
@@ -172,6 +174,20 @@ fn tab_status(rs: &RenderState, tab: Tab) -> (&'static str, ratatui::style::Styl
             }
         }
         Tab::SpeedTest => ok,
+        Tab::Device => {
+            if rs.device.thermal_state != "CRITICAL" && rs.device.mem_pressure_label != "CRITICAL" {
+                ok
+            } else {
+                warn
+            }
+        }
+        Tab::Maintenance => {
+            if rs.maintenance.ssd_reclaimable_gb > 25.0 {
+                warn
+            } else {
+                ok
+            }
+        }
     }
 }
 
@@ -267,11 +283,13 @@ fn draw_header(f: &mut Frame, rs: &RenderState, area: Rect) {
 
 fn draw_context_footer(f: &mut Frame, rs: &RenderState, area: Rect, spin: usize) {
     let keys = match rs.active_tab {
-        Tab::Dashboard => " [Enter] action palette   [R] rescan   [L] zero-lag   [1-5] pages ",
-        Tab::Spectrum => " [R] rescan airspace   [S] sweet-spot locator   [1-5] pages ",
+        Tab::Dashboard => " [Enter] action palette   [R] rescan   [L] zero-lag   [1-7] pages ",
+        Tab::Spectrum => " [R] rescan airspace   [S] sweet-spot locator   [1-7] pages ",
         Tab::Processes => " [↑↓] select   [Space] pause/resume   [B] throttle   [N] LAN sweep ",
         Tab::Tuning => " [↑↓] select   [Space] toggle / run   [P] cycle preset   [A] auto-pilot ",
         Tab::SpeedTest => " [Space] full test   [V] quick 5s   [N] Apple RPM ",
+        Tab::Device => " [C] toggle mascot   [R] refresh hardware   [1-7] pages   [Q] quit ",
+        Tab::Maintenance => " [R] RAM only  [S] SSD only  [A] all  [T] theme  [Space] toggle  [U] uninstall  [1-7] pages ",
     };
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 

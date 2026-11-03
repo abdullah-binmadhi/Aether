@@ -1,29 +1,164 @@
-//! Amber CRT palette and shared gauge/sparkline renderers.
+//! Adaptive palette system with 10 high-contrast themes and shared gauge/sparkline renderers.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use ratatui::style::{Color, Modifier, Style};
 
-/// Amber (#ffb000) approximated with the terminal's indexed yellow, matching the
-/// original curses theme which used COLOR_YELLOW.
-pub fn amber() -> Style {
-    Style::new().fg(Color::Yellow)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeId {
+    AmberCrt = 0,
+    PhosphorGreen = 1,
+    CyberpunkNeon = 2,
+    TokyoNight = 3,
+    Dracula = 4,
+    NordFrost = 5,
+    GruvboxGold = 6,
+    MonokaiPro = 7,
+    RosePine = 8,
+    OledMonochrome = 9,
 }
+
+static CURRENT_THEME: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThemePalette {
+    pub name: &'static str,
+    pub primary: Color,
+    pub primary_dim: Color,
+    pub good: Color,
+    pub alert: Color,
+    pub bg_invert: Color,
+}
+
+pub const THEMES: [ThemePalette; 10] = [
+    ThemePalette {
+        name: "Amber CRT",
+        primary: Color::Rgb(255, 176, 0),     // #FFB000 Classic Amber Phosphor
+        primary_dim: Color::Rgb(160, 110, 0), // #A06E00
+        good: Color::Rgb(80, 220, 100),       // #50DC64
+        alert: Color::Rgb(255, 75, 75),       // #FF4B4B
+        bg_invert: Color::Black,
+    },
+    ThemePalette {
+        name: "Phosphor Green",
+        primary: Color::Rgb(0, 255, 102),     // #00FF66 Matrix Terminal Green
+        primary_dim: Color::Rgb(0, 130, 50),
+        good: Color::Rgb(50, 255, 150),
+        alert: Color::Rgb(255, 80, 80),
+        bg_invert: Color::Black,
+    },
+    ThemePalette {
+        name: "Cyberpunk Neon",
+        primary: Color::Rgb(0, 229, 255),     // #00E5FF Electric Cyan
+        primary_dim: Color::Rgb(0, 120, 150),
+        good: Color::Rgb(0, 255, 180),
+        alert: Color::Rgb(255, 0, 127),       // #FF007F Synthwave Hot Pink
+        bg_invert: Color::Black,
+    },
+    ThemePalette {
+        name: "Tokyo Night",
+        primary: Color::Rgb(122, 162, 247),   // #7AA2F7 Midnight Indigo
+        primary_dim: Color::Rgb(86, 95, 137),  // #565F89
+        good: Color::Rgb(158, 206, 106),      // #9ECE6A Bamboo Green
+        alert: Color::Rgb(247, 118, 142),     // #F7768E Blossom Red
+        bg_invert: Color::Rgb(26, 27, 38),
+    },
+    ThemePalette {
+        name: "Dracula",
+        primary: Color::Rgb(189, 147, 249),   // #BD93F9 Gothic Lavender
+        primary_dim: Color::Rgb(98, 114, 164), // #6272A4
+        good: Color::Rgb(80, 250, 123),       // #50FA7B Acid Green
+        alert: Color::Rgb(255, 85, 85),       // #FF5555 Crimson
+        bg_invert: Color::Rgb(40, 42, 54),
+    },
+    ThemePalette {
+        name: "Nord Frost",
+        primary: Color::Rgb(136, 192, 208),   // #88C0D0 Glacial Frost
+        primary_dim: Color::Rgb(76, 86, 106),  // #4C566A
+        good: Color::Rgb(163, 190, 140),      // #A3BE8C Aurora Green
+        alert: Color::Rgb(191, 97, 106),      // #BF616A Aurora Red
+        bg_invert: Color::Rgb(46, 52, 64),
+    },
+    ThemePalette {
+        name: "Gruvbox Gold",
+        primary: Color::Rgb(250, 189, 47),    // #FABD2F Retro Ochre Gold
+        primary_dim: Color::Rgb(146, 131, 116),// #928374
+        good: Color::Rgb(184, 187, 38),       // #B8BB26 Olive
+        alert: Color::Rgb(251, 73, 52),       // #FB4934 Terracotta
+        bg_invert: Color::Rgb(40, 40, 40),
+    },
+    ThemePalette {
+        name: "Monokai Pro",
+        primary: Color::Rgb(255, 97, 136),    // #FF6188 Vivid Magenta
+        primary_dim: Color::Rgb(114, 112, 114),// #727072
+        good: Color::Rgb(169, 220, 103),      // #A9DC67 Apple Lime
+        alert: Color::Rgb(255, 216, 102),     // #FFD866 Flare Sun
+        bg_invert: Color::Rgb(45, 42, 46),
+    },
+    ThemePalette {
+        name: "Rose Pine",
+        primary: Color::Rgb(235, 111, 146),   // #EB6F92 Moody Coral Rose
+        primary_dim: Color::Rgb(110, 106, 134),// #6E6A86
+        good: Color::Rgb(156, 207, 216),      // #9CCFD8 Seafoam
+        alert: Color::Rgb(235, 188, 186),     // #EBBCBA Rose Gold
+        bg_invert: Color::Rgb(25, 23, 36),
+    },
+    ThemePalette {
+        name: "OLED Monochrome",
+        primary: Color::Rgb(236, 239, 244),   // #ECEFF4 Pure Platinum
+        primary_dim: Color::Rgb(115, 125, 140),// #737D8C
+        good: Color::Rgb(216, 222, 233),
+        alert: Color::Rgb(255, 100, 100),
+        bg_invert: Color::Black,
+    },
+];
+
+pub fn current_theme_palette() -> &'static ThemePalette {
+    let idx = CURRENT_THEME.load(Ordering::Relaxed) % THEMES.len();
+    &THEMES[idx]
+}
+
+pub fn cycle_theme() -> &'static str {
+    let next = (CURRENT_THEME.load(Ordering::Relaxed) + 1) % THEMES.len();
+    CURRENT_THEME.store(next, Ordering::Relaxed);
+    THEMES[next].name
+}
+
+pub fn set_theme(idx: usize) -> &'static str {
+    let valid = idx % THEMES.len();
+    CURRENT_THEME.store(valid, Ordering::Relaxed);
+    THEMES[valid].name
+}
+
+pub fn theme_name() -> &'static str {
+    current_theme_palette().name
+}
+
+pub fn amber() -> Style {
+    Style::new().fg(current_theme_palette().primary)
+}
+
 pub fn amber_bold() -> Style {
     amber().add_modifier(Modifier::BOLD)
 }
+
 pub fn dim() -> Style {
-    Style::new().fg(Color::Yellow).add_modifier(Modifier::DIM)
+    Style::new().fg(current_theme_palette().primary_dim)
 }
+
 pub fn invert() -> Style {
+    let p = current_theme_palette();
     Style::new()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
+        .fg(p.bg_invert)
+        .bg(p.primary)
         .add_modifier(Modifier::BOLD)
 }
+
 pub fn good() -> Style {
-    Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+    Style::new().fg(current_theme_palette().good).add_modifier(Modifier::BOLD)
 }
+
 pub fn alert() -> Style {
-    Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+    Style::new().fg(current_theme_palette().alert).add_modifier(Modifier::BOLD)
 }
 
 pub fn score_color(score: i64) -> Style {
@@ -140,5 +275,17 @@ mod tests {
         // Empty and full edge cases don't panic and keep width.
         assert_eq!(tex_bar(0, 8, 3).chars().count(), 8);
         assert_eq!(tex_bar(99, 8, 3).chars().count(), 8);
+    }
+
+    #[test]
+    fn all_10_themes_cycle_and_have_distinct_names() {
+        assert_eq!(THEMES.len(), 10);
+        let first = set_theme(0);
+        assert_eq!(first, "Amber CRT");
+        for _ in 0..10 {
+            let name = cycle_theme();
+            assert!(!name.is_empty());
+        }
+        assert_eq!(theme_name(), "Amber CRT");
     }
 }

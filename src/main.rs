@@ -117,6 +117,14 @@ struct Cli {
     #[arg(long)]
     export: bool,
 
+    /// Scan and terminate orphaned wifi-tui processes and unfreeze trapped apps.
+    #[arg(long, alias = "clean-orphans")]
+    rescue: bool,
+
+    /// Allow multiple concurrent wifi-tui instances (bypasses single-instance lock).
+    #[arg(long)]
+    multi: bool,
+
     /// Activate a named mission profile (meeting/gaming/stream/bloat/public/rescue) and exit.
     #[arg(long, default_value = "")]
     preset: String,
@@ -186,6 +194,9 @@ fn main() -> io::Result<()> {
     if cli.speedtest {
         return run_cli_speedtest(&cli);
     }
+    if cli.rescue {
+        return run_cli_rescue(&cli);
+    }
     if cli.export {
         return run_cli_export(&cli);
     }
@@ -195,7 +206,7 @@ fn main() -> io::Result<()> {
     if cli.status || cli.json {
         return run_oneshot(&cli);
     }
-    run_tui(&cli.interface)
+    run_tui(&cli.interface, cli.multi)
 }
 
 fn warm_scope(
@@ -339,6 +350,29 @@ fn run_cli_export(cli: &Cli) -> io::Result<()> {
     let (_, _, snap, tel) = warm_scope(&cli.interface);
     let (_, msg) = core::ticket::export_report(&tel, &snap, Some(&tel.history_summary));
     println!("{msg}");
+    Ok(())
+}
+
+fn run_cli_rescue(_cli: &Cli) -> io::Result<()> {
+    println!("// RUNNING WIFI COCKPIT // SYSTEM RESCUE & ORPHAN SHIELD //");
+    println!("{}", "=".repeat(78));
+    let report = core::shield::rescue_system();
+    println!("  Status         : {}", report.diagnosis);
+    println!("  Orphans Reaped : {}", report.orphans_killed.len());
+    for pid in &report.orphans_killed {
+        println!("    [-] Terminated rogue PID {pid}");
+    }
+    println!("  Processes Woken: {} (SIGCONT sent)", report.frozen_procs_resumed);
+    println!(
+        "  Lock Cleaned   : {}",
+        if report.lock_cleaned {
+            "[OK] /tmp/wifi-tui.lock freed"
+        } else {
+            "[OK] Clean"
+        }
+    );
+    println!("{}", "-".repeat(78));
+    println!("  System State   : [OK] Normal baseline restored.");
     Ok(())
 }
 
@@ -516,29 +550,93 @@ use std::sync::Mutex;
 /// This is what makes `[D]`, speedtest, etc. non-blocking: a keypress just sends
 /// an `Action` down the channel and returns instantly, so the UI keeps drawing
 /// (with a spinner) while the worker does the slow work.
-fn run_tui(interface: &str) -> io::Result<()> {
+fn run_tui(interface: &str, multi: bool) -> io::Result<()> {
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() {
+        eprintln!("error: standard input is not a terminal. Use --status or --json for non-interactive output.");
+        std::process::exit(1);
+    }
+
+    // 1. Single-Instance Lock & Automated Ghost Reaper:
+    // If an orphaned or dead wifi-tui process exists from a crash, it is automatically
+    // detected and reaped here before starting the UI.
+    let _instance_lock = if !multi {
+        match core::shield::InstanceLock::acquire() {
+            Ok(lock) => Some(lock),
+            Err(core::shield::LockError::AlreadyRunning(pid)) => {
+                eprintln!(
+                    "[!] wifi-tui is already running in another window (PID {pid}).\n    Run with `wifi-tui --multi` for concurrent sessions, or `wifi-tui --rescue` to clean stale ghosts."
+                );
+                std::process::exit(0);
+            }
+            Err(e) => {
+                core::shield::log_shield(&format!("Instance lock acquisition warning: {e:?}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 2. Dead-Man's Switch: monitors parent process ID (getppid == 1) & TTY severing.
+    let mut _deadman = core::shield::DeadManSwitch::start();
+
+    // 3. CPU Runaway Circuit Breaker: monitors rusage delta; trips if CPU > 85% for 4.5s while idle.
+    let shield_busy = Arc::new(AtomicBool::new(false));
+    let mut _circuit_breaker = core::shield::CpuCircuitBreaker::start(Arc::clone(&shield_busy));
+
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        core::procmon::resume_all_global();
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        default_hook(info);
+    }));
+
     let stop = Arc::new(AtomicBool::new(false));
-    for sig in [
+    let worker_quit = Arc::new(AtomicBool::new(false));
+    let (tx, rx): (Sender<Action>, Receiver<Action>) = mpsc::channel();
+
+    // Dedicated signal watcher thread: guarantees that if SIGHUP, SIGINT or SIGTERM
+    // arrives (e.g. user closes terminal tab / window), all frozen processes are
+    // immediately resumed, terminal state is restored, and the process exits cleanly
+    // instead of lingering as a 100% CPU orphan under launchd.
+    let mut signals = signal_hook::iterator::Signals::new([
         signal_hook::consts::SIGINT,
         signal_hook::consts::SIGTERM,
         signal_hook::consts::SIGHUP,
-    ] {
-        signal_hook::flag::register(sig, Arc::clone(&stop))?;
-    }
+    ])?;
+    let stop_sig = Arc::clone(&stop);
+    let worker_quit_sig = Arc::clone(&worker_quit);
+    let tx_sig = tx.clone();
+    std::thread::spawn(move || {
+        if let Some(sig) = signals.forever().next() {
+            core::procmon::resume_all_global();
+            stop_sig.store(true, Ordering::SeqCst);
+            worker_quit_sig.store(true, Ordering::SeqCst);
+            let _ = tx_sig.send(Action::Quit);
+
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+
+            // Brief grace period for worker to clean up, then exit cleanly.
+            std::thread::sleep(Duration::from_millis(80));
+            std::process::exit(if sig == signal_hook::consts::SIGHUP || sig == signal_hook::consts::SIGINT { 0 } else { 128 + sig });
+        }
+    });
 
     // Build the app on the worker thread (engines aren't Send-friendly to share),
     // but we need its first render snapshot to seed the UI. Construct it inside
     // the worker and hand back the initial snapshot via the shared mutex.
     let shared: Arc<Mutex<Option<RenderState>>> = Arc::new(Mutex::new(None));
-    let worker_quit = Arc::new(AtomicBool::new(false));
-    let (tx, rx): (Sender<Action>, Receiver<Action>) = mpsc::channel();
 
     let worker = {
         let shared = Arc::clone(&shared);
         let worker_quit = Arc::clone(&worker_quit);
         let stop = Arc::clone(&stop);
         let iface = interface.to_string();
-        std::thread::spawn(move || worker_loop(&iface, shared, worker_quit, stop, rx))
+        let shield_busy = Arc::clone(&shield_busy);
+        std::thread::spawn(move || worker_loop(&iface, shared, worker_quit, stop, shield_busy, rx))
     };
 
     // Wait briefly for the worker to publish its first snapshot.
@@ -550,6 +648,7 @@ fn run_tui(interface: &str) -> io::Result<()> {
     let _ = tx.send(Action::Quit); // unblock the worker if it's waiting
     let _ = worker.join();
 
+    core::procmon::resume_all_global();
     restore_terminal(&mut terminal)?;
     if let Err(e) = res {
         eprintln!("error: {e}");
@@ -564,6 +663,7 @@ fn worker_loop(
     shared: Arc<Mutex<Option<RenderState>>>,
     worker_quit: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    shield_busy: Arc<AtomicBool>,
     rx: Receiver<Action>,
 ) {
     let mut app = App::new(interface, Arc::clone(&stop));
@@ -578,9 +678,13 @@ fn worker_loop(
             break;
         }
 
+        // Inform the CPU circuit breaker whether high workload is active
+        let is_busy = app.is_speedtest_running() || app.has_bg_inflight();
+        shield_busy.store(is_busy, Ordering::Relaxed);
+
         // Poll fast while any background work (speedtest or a heavy action) is
         // in flight so live progress / completion is republished promptly.
-        let poll = if app.is_speedtest_running() || app.has_bg_inflight() {
+        let poll = if is_busy {
             Duration::from_millis(80)
         } else {
             Duration::from_millis(120)
@@ -660,13 +764,27 @@ fn ui_loop(
             terminal.draw(|f| ui::draw(f, &rs, spin))?;
 
             // Read a key with a short timeout so the spinner animates.
-            if event::poll(Duration::from_millis(80))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        if let Some(action) = map_key(&rs, key.code, key.modifiers, &mut quitting) {
-                            let _ = tx.send(action);
+            // If stdin is closed / revoked (EOF), poll returns Err or false.
+            match event::poll(Duration::from_millis(80)) {
+                Ok(true) => {
+                    if let Event::Key(key) = event::read()? {
+                        if key.kind == KeyEventKind::Press {
+                            if let Some(action) = map_key(&rs, key.code, key.modifiers, &mut quitting) {
+                                let _ = tx.send(action);
+                            }
                         }
                     }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    // Stdin closed, revoked or EOF: exit UI loop gracefully.
+                    if e.kind() == io::ErrorKind::UnexpectedEof
+                        || e.kind() == io::ErrorKind::BrokenPipe
+                        || e.kind() == io::ErrorKind::NotFound
+                    {
+                        break;
+                    }
+                    return Err(e);
                 }
             }
         } else {
@@ -729,10 +847,19 @@ fn map_key(
         KeyCode::Char('3') => SwitchTab(Tab::Processes),
         KeyCode::Char('4') => SwitchTab(Tab::Tuning),
         KeyCode::Char('5') => SwitchTab(Tab::SpeedTest),
+        KeyCode::Char('6') => SwitchTab(Tab::Device),
+        KeyCode::Char('7') => SwitchTab(Tab::Maintenance),
         KeyCode::Tab => NextTab,
         KeyCode::BackTab => PrevTab,
+        KeyCode::Left | KeyCode::Right => {
+            if tab == Tab::Maintenance {
+                MaintenanceToggleFocus
+            } else {
+                return None;
+            }
+        }
         KeyCode::Char('j') | KeyCode::Down => {
-            if tab == Tab::Processes || tab == Tab::Tuning {
+            if tab == Tab::Processes || tab == Tab::Tuning || tab == Tab::Maintenance {
                 CursorDown
             } else if code == KeyCode::Char('j') {
                 ExportTicket
@@ -747,7 +874,15 @@ fn map_key(
         KeyCode::Char('v') | KeyCode::Char('V') if tab == Tab::SpeedTest => SpeedQuick,
         KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::SpeedTest => SpeedApple,
         KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::Processes => LanSweep,
-        KeyCode::Char('u') | KeyCode::Char('U') if tab == Tab::Processes => ResumeAll,
+        KeyCode::Char('u') | KeyCode::Char('U') => {
+            if tab == Tab::Maintenance {
+                UninstallSelectedApp
+            } else if tab == Tab::Processes {
+                ResumeAll
+            } else {
+                return None;
+            }
+        }
         KeyCode::Char('p') => PaletteOpen,
         KeyCode::Char('P') => CyclePreset,
         KeyCode::Char('w') | KeyCode::Char('W') => ToggleWmm,
@@ -755,15 +890,26 @@ fn map_key(
         KeyCode::Char('o') | KeyCode::Char('O') => Hop2Repair,
         KeyCode::Char('i') | KeyCode::Char('I') => Prewarm,
         KeyCode::Char('g') | KeyCode::Char('G') => Boost,
-        KeyCode::Char('l') | KeyCode::Char('L') => ZeroLag,
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            if tab == Tab::Maintenance {
+                CycleSafetyTier
+            } else {
+                ZeroLag
+            }
+        }
         KeyCode::Char('z') | KeyCode::Char('Z') => ZombieSync,
         KeyCode::Char('d') | KeyCode::Char('D') => Doctor,
         KeyCode::Char('y') | KeyCode::Char('Y') => QuicFastpath,
         KeyCode::Char('b') | KeyCode::Char('B') => Shape,
         KeyCode::Char('h') | KeyCode::Char('H') => SafeRenew,
         KeyCode::Char('f') | KeyCode::Char('F') => FixExclamation,
-        KeyCode::Char('6') => Ipv6Guard,
-        KeyCode::Char('t') | KeyCode::Char('T') => MtuClamp,
+        KeyCode::Char('t') | KeyCode::Char('T') => {
+            if tab == Tab::Maintenance {
+                CycleTheme
+            } else {
+                MtuClamp
+            }
+        }
         KeyCode::Char('m') | KeyCode::Char('M') => {
             if tab == Tab::Tuning {
                 MacPrivacy
@@ -775,15 +921,37 @@ fn map_key(
         KeyCode::Char('[') => VisualPrev,
         KeyCode::Char('e') | KeyCode::Char('E') => PwOpen,
         KeyCode::Char('s') | KeyCode::Char('S') => {
-            if tab == Tab::Spectrum {
+            if tab == Tab::Maintenance {
+                OptSsdOnly
+            } else if tab == Tab::Spectrum {
                 SweetSpot
             } else {
                 RootAuth
             }
         }
-        KeyCode::Char('a') | KeyCode::Char('A') => AutoPilot,
-        KeyCode::Char('c') | KeyCode::Char('C') => CaptiveGateway,
-        KeyCode::Char('r') | KeyCode::Char('R') => RoamRescan,
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            if tab == Tab::Maintenance {
+                OptAll
+            } else {
+                AutoPilot
+            }
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            if tab == Tab::Device || tab == Tab::Maintenance {
+                ToggleMascot
+            } else {
+                CaptiveGateway
+            }
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            if tab == Tab::Maintenance {
+                OptRamOnly
+            } else if tab == Tab::Device {
+                RefreshHardware
+            } else {
+                RoamRescan
+            }
+        }
         _ => return None,
     };
     Some(a)

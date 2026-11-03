@@ -89,6 +89,13 @@ pub struct RenderState {
     /// Automatic Game Mode: active flag + detected game name, for the UI badge.
     pub game_mode_active: bool,
     pub game_name: String,
+
+    /// Tab 6: Hardware, Silicon & System Cockpit
+    pub device: crate::core::device_info::DeviceInfo,
+
+    /// Tab 7: Zero-Touch Maintenance & Device Optimizer
+    pub maintenance: crate::core::maintenance::MaintenanceSnapshot,
+    pub active_theme_name: String,
 }
 
 #[derive(Clone)]

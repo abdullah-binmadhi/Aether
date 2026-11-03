@@ -61,6 +61,8 @@ wifi-tui --speedtest     # multi-stream speed + bufferbloat
 wifi-tui --sweetspot     # real-time acoustic sweet-spot locator
 wifi-tui --export        # write ISP diagnostic markdown ticket
 wifi-tui --preset gaming # activate a mission profile
+wifi-tui --rescue        # scan and reap orphaned ghost instances & unfreeze processes
+wifi-tui --multi         # allow multiple concurrent TUI sessions (bypass single-instance lock)
 wifi-tui --watchdog      # foreground link-anomaly watchdog loop
 wifi-tui --daemon        # foreground autonomous self-healing loop
 wifi-tui --daemon-install / --daemon-uninstall / --daemon-status

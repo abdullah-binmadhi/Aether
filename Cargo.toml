@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2"
 netdev = "0.47.0"
 objc2 = "0.6.5"
 objc2-core-wlan = "0.3.2"
@@ -29,6 +30,9 @@ thiserror = "2.0.21"
 opt-level = 3
 lto = "thin"
 strip = true
+
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }
 
 [lints.rust]
 # unsafe is confined to the CoreWLAN FFI module, which re-allows it locally.

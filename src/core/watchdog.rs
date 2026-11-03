@@ -51,7 +51,7 @@ pub fn evaluate_link_anomalies(tel: &Telemetry) -> LinkAnomaly {
 pub fn run_watchdog_daemon(interface: &str, interval_sec: u64, max_ticks: Option<u64>) -> i32 {
     let mut collector = Collector::new(interface);
     let mut scope = super::PingScope::new(interface);
-    println!("⚡ WIFI TUI Watchdog Daemon started (polling every {interval_sec}s)...");
+    println!("◆ WIFI TUI Watchdog Daemon started (polling every {interval_sec}s)...");
     let mut tick = 0u64;
     loop {
         tick += 1;
