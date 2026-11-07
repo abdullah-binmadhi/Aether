@@ -366,7 +366,7 @@ fn run_cli_rescue(_cli: &Cli) -> io::Result<()> {
     println!(
         "  Lock Cleaned   : {}",
         if report.lock_cleaned {
-            "[OK] /tmp/wifi-tui.lock freed"
+            "[OK] /tmp/aether.lock freed"
         } else {
             "[OK] Clean"
         }

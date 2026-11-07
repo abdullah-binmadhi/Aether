@@ -93,7 +93,7 @@ pub fn status() -> String {
 }
 
 /// Autonomous self-healing daemon loop. Ported from daemon.run_autonomous_daemon.
-/// This is what the installed LaunchAgent executes via `wifi-tui --daemon`.
+/// This is what the installed LaunchAgent executes via `aether --daemon`.
 pub fn run_autonomous_daemon(interface: &str, interval_sec: u64, max_ticks: Option<u64>) -> i32 {
     use super::antilag::AntiLagEngine;
     use super::collector::Collector;

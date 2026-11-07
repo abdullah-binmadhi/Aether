@@ -175,7 +175,7 @@ impl CpuCircuitBreaker {
                                 cpu_ratio * 100.0
                             );
                             log_shield(&msg);
-                            eprintln!("\n[!] wifi-tui: {msg}\n");
+                            eprintln!("\n[!] aether: {msg}\n");
                             procmon::resume_all_global();
                             std::process::exit(1);
                         }
@@ -261,7 +261,7 @@ impl InstanceLock {
         if let Some(pid) = existing_pid {
             // Check if existing PID is an orphaned runaway or dead process
             if Self::is_orphan_or_dead(pid) {
-                log_shield(&format!("Detected orphaned wifi-tui process (PID {pid}). Reaping..."));
+                log_shield(&format!("Detected orphaned aether process (PID {pid}). Reaping..."));
                 Self::kill_process(pid);
                 std::thread::sleep(Duration::from_millis(100));
 
@@ -363,7 +363,7 @@ pub struct RescueReport {
 }
 
 /// One-shot automated scan and rescue for the entire macOS host.
-/// 1. Finds and kills any rogue or orphaned `wifi-tui` processes (PPID 1, TTY ??).
+/// 1. Finds and kills any rogue or orphaned `aether` processes (PPID 1, TTY ??).
 /// 2. Scans for any processes in `T` (stopped) state and wakes them with `SIGCONT`.
 /// 3. Resumes all paused processes recorded in global registry.
 /// 4. Cleans up stale lock files.
@@ -371,7 +371,7 @@ pub fn rescue_system() -> RescueReport {
     let mut report = RescueReport::default();
     let current_pid = unsafe { libc::getpid() };
 
-    // 1. Scan process table for wifi-tui instances
+    // 1. Scan process table for aether / wifi-tui instances
     let out = std::process::Command::new("ps")
         .args(["-e", "-o", "pid=,ppid=,tty=,comm="])
         .output()

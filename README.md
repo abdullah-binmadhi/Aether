@@ -385,31 +385,61 @@ aether --daemon
 - **macOS** 12.0 (Monterey) or later (Apple Silicon M1/M2/M3/M4 or Intel).
 - Compatible with Linux (x86_64, aarch64) and Windows 11.
 
-### Option A: Install via Cargo (Recommended)
+---
+
+### Option A: 1-Line Universal Installer (Fastest)
+
+Run the automated installer directly in your terminal. It detects your architecture, verifies the Rust toolchain, compiles `aether`, and configures binary paths and aliases:
 
 ```bash
-# Install directly from the repository
-cargo install --path . --force
+curl -fsSL https://raw.githubusercontent.com/abdullah-binmadhi/WIFI-TUI/main/install.sh | bash
 ```
 
-### Option B: Build from Source
+---
+
+### Option B: Install via Cargo (No Git Clone Required)
+
+If you have Rust and Cargo installed, install Aether globally with a single command from any directory:
 
 ```bash
-# Clone the repository
-git clone https://github.com/abdullah-binmadhi/WIFI-TUI.git
-cd WIFI-TUI
+cargo install --git https://github.com/abdullah-binmadhi/WIFI-TUI.git --force
+```
 
-# Compile optimized release binary
+*(This compiles and places `aether` and the `wifi-tui` binary alias into your `$HOME/.cargo/bin/` folder).*
+
+---
+
+### Option C: Build from Source
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/abdullah-binmadhi/WIFI-TUI.git aether
+cd aether
+
+# 2. Compile optimized release binaries
 cargo build --release
 
-# Install to local path
-sudo cp target/release/aether /usr/local/bin/aether
+# 3. Copy binaries to your local bin path
+mkdir -p ~/.local/bin
+cp target/release/aether ~/.local/bin/
+cp target/release/wifi-tui ~/.local/bin/
 ```
+
+---
+
+### Transparent Binary Aliasing
+
+> [!NOTE]
+> **Aether** is the primary command. For complete backward compatibility, the installer automatically builds and registers **`wifi-tui`** as a native transparent alias.
+> Running `aether` or `wifi-tui` executes the exact same grand cockpit:
+> ```bash
+> aether --version     # aether 2.0.0
+> wifi-tui --version   # aether 2.0.0 (transparent alias)
+> ```
 
 Verify your installation:
 ```bash
-aether --version
-# Output: aether 2.0.0
+aether --status
 ```
 
 ---
