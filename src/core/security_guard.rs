@@ -1,14 +1,17 @@
 //! Rogue-AP / ARP / DNS security audit. Ported from security_guard.py.
 
 use std::net::ToSocketAddrs;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::cmd;
 use super::lan_scanner::resolve_mac_vendor;
 use super::model::Telemetry;
 
-const CANARY_NXDOMAIN: &str = "wifi-tui-nxdomain-canary-test-98234.invalid";
+const CANARY_NXDOMAIN: &str = "aether-nxdomain-canary-test-98234.invalid";
 
+#[derive(Clone)]
 pub struct SecurityReport {
     pub security_score: i64,
     pub threat_level: String,
@@ -20,6 +23,9 @@ pub struct SecurityGuard {
     interface: String,
     baseline_gateway_mac: Option<String>,
     last_gateway_ip: String,
+    pub cached_report: Arc<Mutex<Option<SecurityReport>>>,
+    pub is_auditing: Arc<AtomicBool>,
+    pub last_audit: Option<Instant>,
 }
 
 impl SecurityGuard {
@@ -28,6 +34,9 @@ impl SecurityGuard {
             interface: interface.to_string(),
             baseline_gateway_mac: None,
             last_gateway_ip: String::new(),
+            cached_report: Arc::new(Mutex::new(None)),
+            is_auditing: Arc::new(AtomicBool::new(false)),
+            last_audit: None,
         }
     }
 
@@ -61,7 +70,7 @@ impl SecurityGuard {
         let is_enc = ["WPA2", "WPA3", "WPA", "802.1X", "ENTERPRISE", "PSK"]
             .iter()
             .any(|k| sec_upper.contains(k));
-        let my_vendor = resolve_mac_vendor(&tel.mac);
+        let my_vendor = resolve_mac_vendor(&tel.mac).0;
         let known_brands = [
             "Apple",
             "Ubiquiti",
@@ -81,7 +90,7 @@ impl SecurityGuard {
                 continue;
             }
             // Neighbour security isn't tracked per-AP in our scan; treat labels only.
-            let cand_vendor = resolve_mac_vendor("");
+            let cand_vendor = resolve_mac_vendor("").0;
             if is_enc && net.label.to_uppercase().contains("OPEN") {
                 evil_twins += 1;
                 any_critical = true;
@@ -198,7 +207,7 @@ impl SecurityGuard {
                 );
             }
         }
-        let vendor = resolve_mac_vendor(&gw_mac);
+        let (vendor, _) = resolve_mac_vendor(&gw_mac);
         (
             "CLEAN".into(),
             false,
@@ -248,6 +257,58 @@ impl SecurityGuard {
     }
 
     pub fn run_security_audit(&mut self, tel: &Telemetry) -> SecurityReport {
+        // 1. Ingest fresh cached report if available (< 0.005ms)
+        if let Ok(guard) = self.cached_report.lock() {
+            if let Some(rep) = guard.as_ref() {
+                if let Some(t) = self.last_audit {
+                    if t.elapsed() < Duration::from_secs(20) {
+                        return rep.clone();
+                    }
+                }
+            }
+        }
+
+        self.last_audit = Some(Instant::now());
+
+        // 2. Spawn background audit if not already in flight
+        let cached_ref = Arc::clone(&self.cached_report);
+        let auditing_ref = Arc::clone(&self.is_auditing);
+        let mut guard_clone = SecurityGuard {
+            interface: self.interface.clone(),
+            baseline_gateway_mac: self.baseline_gateway_mac.clone(),
+            last_gateway_ip: self.last_gateway_ip.clone(),
+            cached_report: Arc::clone(&self.cached_report),
+            is_auditing: Arc::clone(&self.is_auditing),
+            last_audit: self.last_audit,
+        };
+        let tel_clone = tel.clone();
+
+        if auditing_ref.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            std::thread::spawn(move || {
+                let report = guard_clone.perform_audit(&tel_clone);
+                if let Ok(mut g) = cached_ref.lock() {
+                    *g = Some(report);
+                }
+                auditing_ref.store(false, Ordering::SeqCst);
+            });
+        }
+
+        // Return current cached report or safe baseline
+        if let Ok(guard) = self.cached_report.lock() {
+            if let Some(rep) = guard.as_ref() {
+                return rep.clone();
+            }
+        }
+
+        SecurityReport {
+            security_score: 100,
+            threat_level: "CLEAN".into(),
+            threats: Vec::new(),
+            remediations: Vec::new(),
+        }
+    }
+
+    pub fn perform_audit(&mut self, tel: &Telemetry) -> SecurityReport {
         let (rogue_lvl, rogue_threat, rogue_crit, rogue_sum) = self.audit_rogue_aps(tel);
         let (arp_lvl, arp_threat, arp_crit, arp_sum) = self.audit_arp(&tel.gateway);
         let (dns_lvl, dns_threat, _dns_crit, dns_sum) = self.audit_dns();

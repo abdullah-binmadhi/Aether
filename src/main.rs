@@ -1,4 +1,4 @@
-//! wifi-tui — native Rust macOS Wi-Fi cockpit.
+//! aether — native Rust system, silicon & network cockpit.
 //!
 //! Entry point: argument parsing, one-shot CLI reports, and the interactive TUI
 //! with a signal handler that guarantees frozen processes are resumed on exit.
@@ -32,9 +32,9 @@ use app::{App, Tab};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "wifi-tui",
+    name = "aether",
     version,
-    about = "Amber CRT macOS Wi-Fi cockpit: RF telemetry, 4-hop bufferbloat matrix, spectrum radar & per-process firewall"
+    about = "Aether — Native System, Silicon & Network Cockpit in Rust"
 )]
 struct Cli {
     /// Wi-Fi interface to monitor.
@@ -117,11 +117,11 @@ struct Cli {
     #[arg(long)]
     export: bool,
 
-    /// Scan and terminate orphaned wifi-tui processes and unfreeze trapped apps.
+    /// Scan and terminate orphaned aether processes and unfreeze trapped apps.
     #[arg(long, alias = "clean-orphans")]
     rescue: bool,
 
-    /// Allow multiple concurrent wifi-tui instances (bypasses single-instance lock).
+    /// Allow multiple concurrent aether instances (bypasses single-instance lock).
     #[arg(long)]
     multi: bool,
 
@@ -232,7 +232,7 @@ fn run_cli_debloat(cli: &Cli) -> io::Result<()> {
     let (_, _, snap, tel) = warm_scope(&cli.interface);
     let anomaly = core::hop2::detect_anomaly(&snap);
     let band_eff = core::hop2::evaluate_band_efficiency(&tel);
-    println!("// RUNNING WIFI COCKPIT // 6-STAGE HOP 2 ANTI-BLOAT & DE-JITTER ENGINE //");
+    println!("// RUNNING AETHER COCKPIT // 6-STAGE HOP 2 ANTI-BLOAT & DE-JITTER ENGINE //");
     println!("{}", "=".repeat(78));
     println!("  Initial State : {}", anomaly.diagnosis);
     println!("  RF Efficiency : {band_eff}");
@@ -284,7 +284,7 @@ fn run_cli_security_guard(cli: &Cli) -> io::Result<()> {
     let (_, _, _, tel) = warm_scope(&cli.interface);
     let mut guard = core::security_guard::SecurityGuard::new(&cli.interface);
     let rep = guard.run_security_audit(&tel);
-    println!("// RUNNING WIFI COCKPIT // NETWORK SECURITY & ROGUE AP GUARD //");
+    println!("// RUNNING AETHER COCKPIT // NETWORK SECURITY & ROGUE AP GUARD //");
     println!("{}", "=".repeat(78));
     println!("  Security Score  : {}/100", rep.security_score);
     println!("  Threat Posture  : [{}]", rep.threat_level);
@@ -300,7 +300,7 @@ fn run_cli_security_guard(cli: &Cli) -> io::Result<()> {
 fn run_cli_gateway(cli: &Cli) -> io::Result<()> {
     let mut rebooter = core::gateway::GatewayRebooter::new("");
     let gw = rebooter.resolve_gateway_ip();
-    println!("// RUNNING WIFI COCKPIT // GATEWAY ADMINISTRATION & REBOOTER ({gw}) //");
+    println!("// RUNNING AETHER COCKPIT // GATEWAY ADMINISTRATION & REBOOTER ({gw}) //");
     println!("{}", "=".repeat(78));
     println!("  {}", rebooter.get_wan_status());
     if cli.confirm {
@@ -323,7 +323,7 @@ fn run_cli_speedtest(cli: &Cli) -> io::Result<()> {
     let shared = core::speedtest::Shared::new(std::sync::Mutex::new(
         core::speedtest::SpeedtestState::default(),
     ));
-    println!("// RUNNING WIFI COCKPIT // MULTI-STREAM SPEED & BUFFERBLOAT SUITE //");
+    println!("// RUNNING AETHER COCKPIT // MULTI-STREAM SPEED & BUFFERBLOAT SUITE //");
     let msg = core::speedtest::run_full_suite(&shared, target, true);
     let st = shared.lock().unwrap();
     let snap = core::speedtest::snapshot(&st, &tel);
@@ -416,7 +416,7 @@ fn run_cli_preset(cli: &Cli) -> io::Result<()> {
 fn run_cli_doctor(cli: &Cli) -> io::Result<()> {
     let mut kernel = core::kernel_tuner::KernelTuner::new("Wi-Fi", &cli.interface);
     let mut doctor = core::wan_doctor::WanDoctor::new(&cli.interface, "Wi-Fi");
-    println!("// RUNNING WIFI COCKPIT // WAN & YOUTUBE AUTO-DOCTOR //");
+    println!("// RUNNING AETHER COCKPIT // WAN & YOUTUBE AUTO-DOCTOR //");
     println!("{}", "=".repeat(78));
     let (ok, summary) = doctor.run_auto_doctor(Some(&mut kernel), false);
     println!("  {summary}");
@@ -444,7 +444,7 @@ fn run_cli_orchestrate(cli: &Cli) -> io::Result<()> {
     let snap = scope.probe();
     let tel = collector.collect(snap.avg_ms, snap.loss_pct);
     let mut orch = core::orchestrator::Orchestrator::new(&cli.interface, "Wi-Fi");
-    println!("// RUNNING WIFI COCKPIT // 4-TIER AUTONOMOUS SELF-HEALING ORCHESTRATOR //");
+    println!("// RUNNING AETHER COCKPIT // 4-TIER AUTONOMOUS SELF-HEALING ORCHESTRATOR //");
     println!("{}", "=".repeat(78));
     let res = orch.run(&tel, &snap, cli.tier);
     println!("  {}", res.summary);
@@ -558,14 +558,14 @@ fn run_tui(interface: &str, multi: bool) -> io::Result<()> {
     }
 
     // 1. Single-Instance Lock & Automated Ghost Reaper:
-    // If an orphaned or dead wifi-tui process exists from a crash, it is automatically
+    // If an orphaned or dead aether process exists from a crash, it is automatically
     // detected and reaped here before starting the UI.
     let _instance_lock = if !multi {
         match core::shield::InstanceLock::acquire() {
             Ok(lock) => Some(lock),
             Err(core::shield::LockError::AlreadyRunning(pid)) => {
                 eprintln!(
-                    "[!] wifi-tui is already running in another window (PID {pid}).\n    Run with `wifi-tui --multi` for concurrent sessions, or `wifi-tui --rescue` to clean stale ghosts."
+                    "[!] aether is already running in another window (PID {pid}).\n    Run with `aether --multi` for concurrent sessions, or `aether --rescue` to clean stale ghosts."
                 );
                 std::process::exit(0);
             }
@@ -763,9 +763,10 @@ fn ui_loop(
             spin = spin.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &rs, spin))?;
 
-            // Read a key with a short timeout so the spinner animates.
+            // Read a key with a short 20ms timeout so the UI animates at 50 FPS
+            // and keypresses are handled instantly with zero latency.
             // If stdin is closed / revoked (EOF), poll returns Err or false.
-            match event::poll(Duration::from_millis(80)) {
+            match event::poll(Duration::from_millis(20)) {
                 Ok(true) => {
                     if let Event::Key(key) = event::read()? {
                         if key.kind == KeyEventKind::Press {
@@ -849,17 +850,35 @@ fn map_key(
         KeyCode::Char('5') => SwitchTab(Tab::SpeedTest),
         KeyCode::Char('6') => SwitchTab(Tab::Device),
         KeyCode::Char('7') => SwitchTab(Tab::Maintenance),
+        KeyCode::Char('8') => SwitchTab(Tab::LanRadar),
+        KeyCode::Char('9') => SwitchTab(Tab::GamingRadar),
+        KeyCode::Char('0') => SwitchTab(Tab::PrivacyFortress),
         KeyCode::Tab => NextTab,
         KeyCode::BackTab => PrevTab,
-        KeyCode::Left | KeyCode::Right => {
+        KeyCode::Left => {
             if tab == Tab::Maintenance {
-                MaintenanceToggleFocus
+                MaintenanceFocusPrev
+            } else if tab == Tab::PrivacyFortress {
+                PrivacyToggleColumn
             } else {
                 return None;
             }
         }
+        KeyCode::Right => {
+            if tab == Tab::Maintenance {
+                MaintenanceToggleFocus
+            } else if tab == Tab::PrivacyFortress {
+                PrivacyToggleColumn
+            } else {
+                return None;
+            }
+        }
+        KeyCode::PageUp => PageUp,
+        KeyCode::PageDown => PageDown,
+        KeyCode::Home => Home,
+        KeyCode::End => End,
         KeyCode::Char('j') | KeyCode::Down => {
-            if tab == Tab::Processes || tab == Tab::Tuning || tab == Tab::Maintenance {
+            if tab == Tab::Processes || tab == Tab::Tuning || tab == Tab::Maintenance || tab == Tab::LanRadar || tab == Tab::GamingRadar || tab == Tab::PrivacyFortress {
                 CursorDown
             } else if code == KeyCode::Char('j') {
                 ExportTicket
@@ -867,10 +886,33 @@ fn map_key(
                 return None;
             }
         }
-        KeyCode::Char('k') | KeyCode::Up => CursorUp,
+        KeyCode::Char('k') | KeyCode::Up => {
+            if tab == Tab::Processes || tab == Tab::Tuning || tab == Tab::Maintenance || tab == Tab::LanRadar || tab == Tab::GamingRadar || tab == Tab::PrivacyFortress {
+                CursorUp
+            } else {
+                CursorUp
+            }
+        }
         KeyCode::Char('J') => ExportTicket,
         KeyCode::Char('K') => CamPacer,
-        KeyCode::Char(' ') | KeyCode::Enter => Confirm,
+        KeyCode::Char(' ') => {
+            if tab == Tab::GamingRadar {
+                GamingToggleShield
+            } else if tab == Tab::LanRadar {
+                LanToggleTrust
+            } else if tab == Tab::PrivacyFortress {
+                DnsApplySelected
+            } else {
+                Confirm
+            }
+        }
+        KeyCode::Enter => {
+            if tab == Tab::PrivacyFortress {
+                DnsApplySelected
+            } else {
+                Confirm
+            }
+        },
         KeyCode::Char('v') | KeyCode::Char('V') if tab == Tab::SpeedTest => SpeedQuick,
         KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::SpeedTest => SpeedApple,
         KeyCode::Char('n') | KeyCode::Char('N') if tab == Tab::Processes => LanSweep,
@@ -883,13 +925,26 @@ fn map_key(
                 return None;
             }
         }
-        KeyCode::Char('p') => PaletteOpen,
-        KeyCode::Char('P') => CyclePreset,
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            if tab == Tab::LanRadar {
+                LanPortScan
+            } else if code == KeyCode::Char('p') {
+                PaletteOpen
+            } else {
+                CyclePreset
+            }
+        }
         KeyCode::Char('w') | KeyCode::Char('W') => ToggleWmm,
         KeyCode::Char('x') | KeyCode::Char('X') => ToggleNoDelay,
         KeyCode::Char('o') | KeyCode::Char('O') => Hop2Repair,
         KeyCode::Char('i') | KeyCode::Char('I') => Prewarm,
-        KeyCode::Char('g') | KeyCode::Char('G') => Boost,
+        KeyCode::Char('g') | KeyCode::Char('G') => {
+            if tab == Tab::GamingRadar {
+                GamingCycleFilter
+            } else {
+                Boost
+            }
+        }
         KeyCode::Char('l') | KeyCode::Char('L') => {
             if tab == Tab::Maintenance {
                 CycleSafetyTier
@@ -898,7 +953,13 @@ fn map_key(
             }
         }
         KeyCode::Char('z') | KeyCode::Char('Z') => ZombieSync,
-        KeyCode::Char('d') | KeyCode::Char('D') => Doctor,
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            if tab == Tab::PrivacyFortress {
+                DnsResetDhcp
+            } else {
+                Doctor
+            }
+        }
         KeyCode::Char('y') | KeyCode::Char('Y') => QuicFastpath,
         KeyCode::Char('b') | KeyCode::Char('B') => Shape,
         KeyCode::Char('h') | KeyCode::Char('H') => SafeRenew,
@@ -948,6 +1009,12 @@ fn map_key(
                 OptRamOnly
             } else if tab == Tab::Device {
                 RefreshHardware
+            } else if tab == Tab::LanRadar {
+                LanSweep
+            } else if tab == Tab::GamingRadar {
+                GamingRescan
+            } else if tab == Tab::PrivacyFortress {
+                DnsRace
             } else {
                 RoamRescan
             }

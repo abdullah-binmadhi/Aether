@@ -9,7 +9,7 @@
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::core::maintenance::MaintenanceSnapshot;
@@ -101,30 +101,32 @@ fn draw_banner(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
     let mut lines = Vec::new();
     let cur_theme = theme_name();
     let tier_str = match snap.active_safety_level {
-        2 => "Level 2 (Balanced Developer)",
-        3 => "Level 3 (Deep App Uninstaller)",
-        _ => "Level 1 (Zero-Touch Safe)",
+        2 => "L2: Balanced",
+        3 => "L3: Deep Uninstaller",
+        _ => "L1: Zero-Touch Safe",
     };
 
     if snap.mascot_visible {
         lines.push(Line::from(vec![
             Span::styled("  /\\_/\\   ", amber_bold()),
             Span::styled("SAFETY GUARANTEE: ", good()),
-            Span::styled("Zen Browser tabs, sessions & CLI credentials locked & shielded!  ", dim()),
+            Span::styled("Zen Browser tabs & CLI credentials locked & shielded!  ", dim()),
             Span::styled(format!("THEME: [{cur_theme}]"), amber_bold()),
         ]));
         lines.push(Line::from(vec![
             Span::styled(" ( o.o )  ", amber_bold()),
             Span::styled("[R] ", amber_bold()),
-            Span::styled("RAM Only   ", dim()),
+            Span::styled("RAM   ", dim()),
             Span::styled("[S] ", amber_bold()),
-            Span::styled("SSD Only   ", dim()),
+            Span::styled("SSD   ", dim()),
             Span::styled("[A] ", amber_bold()),
-            Span::styled("All-in-One   ", dim()),
+            Span::styled("All   ", dim()),
             Span::styled("[L/Space] ", good()),
             Span::styled(format!("Tier: {tier_str}   "), amber_bold()),
-            Span::styled("[T] ", amber_bold()),
-            Span::styled("Theme", dim()),
+            Span::styled("[←/→] ", good()),
+            Span::styled("Panels   ", dim()),
+            Span::styled("[PgUp/Dn] ", amber()),
+            Span::styled("Console", dim()),
         ]));
     } else {
         lines.push(Line::from(vec![
@@ -134,10 +136,7 @@ fn draw_banner(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
         ]));
         lines.push(Line::from(vec![
             Span::styled(" ◆ CONTROLS: ", amber_bold()),
-            Span::styled("[R] RAM Only  [S] SSD Only  [A] All  ", dim()),
-            Span::styled("[L/Space] ", good()),
-            Span::styled(format!("Tier: {tier_str}  "), amber_bold()),
-            Span::styled("[T] Theme  [Tab] Switch Panel  [U] Uninstall App", dim()),
+            Span::styled("[R] RAM  [S] SSD  [A] All  [L/Space] Tier  [←/→] Panels  [PgUp/Dn] Log  [U] Uninstall", dim()),
         ]));
     }
 
@@ -151,32 +150,46 @@ fn draw_charts_and_checklist(f: &mut Frame, snap: &MaintenanceSnapshot, area: Re
     } else {
         "◉ MEMORY & STORAGE BREAKDOWN CHARTS"
     };
-    let block = titled_block(title);
+    let block = if is_focused {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(amber_bold())
+            .title(Span::styled(format!(" {title} "), amber_bold()))
+    } else {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(dim())
+            .title(Span::styled(format!(" {title} "), dim()))
+    };
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let mut lines = Vec::new();
     let gauge_w = (inner.width as usize).saturating_sub(26).clamp(8, 20);
+    let total_ram = snap.ram_total_gb.max(8.0);
+    let compact = inner.height < 17;
 
     // RAM breakdown chart
     lines.push(Line::from(Span::styled(" UNIFIED MEMORY HEADROOM & CACHE:", amber_bold())));
     lines.push(Line::from(vec![
         Span::styled("  Active Apps ", dim()),
-        Span::styled(bar(snap.ram_active_gb, 0.0, 16.0, gauge_w), amber()),
+        Span::styled(bar(snap.ram_active_gb, 0.0, total_ram, gauge_w), amber()),
         Span::styled(format!(" {:>4.1} GB", snap.ram_active_gb), amber()),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Wired Mach  ", dim()),
-        Span::styled(bar(snap.ram_wired_gb, 0.0, 16.0, gauge_w), amber()),
+        Span::styled(bar(snap.ram_wired_gb, 0.0, total_ram, gauge_w), amber()),
         Span::styled(format!(" {:>4.1} GB", snap.ram_wired_gb), amber()),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Reclaimable ", dim()),
-        Span::styled(bar(snap.ram_reclaimable_gb, 0.0, 16.0, gauge_w), good()),
+        Span::styled(bar(snap.ram_reclaimable_gb, 0.0, total_ram, gauge_w), good()),
         Span::styled(format!(" {:>4.1} GB ◄ [PURGEABLE]", snap.ram_reclaimable_gb), good()),
     ]));
 
-    lines.push(Line::from(""));
+    if !compact {
+        lines.push(Line::from(""));
+    }
 
     // Storage breakdown chart
     lines.push(Line::from(Span::styled(
@@ -204,7 +217,9 @@ fn draw_charts_and_checklist(f: &mut Frame, snap: &MaintenanceSnapshot, area: Re
         Span::styled(format!(" {:>4.1} GB", snap.ssd_logs_gb), dim()),
     ]));
 
-    lines.push(Line::from(""));
+    if !compact {
+        lines.push(Line::from(""));
+    }
 
     // Interactive Checklist & Safety Tier Selector
     lines.push(Line::from(Span::styled(" INTERACTIVE CHECKLIST & SAFETY TIER:", amber_bold())));
@@ -232,6 +247,7 @@ fn draw_charts_and_checklist(f: &mut Frame, snap: &MaintenanceSnapshot, area: Re
         ("Stale DiagnosticReports & Logs", snap.ssd_logs_gb, snap.target_checks[3]),
     ];
 
+    let avail_label_w = (inner.width as usize).saturating_sub(22).clamp(16, 30);
     for (idx, (label, sz, checked)) in targets.iter().enumerate() {
         let row_idx = idx + 1;
         let is_row_sel = is_focused && snap.checklist_cursor == row_idx;
@@ -245,9 +261,15 @@ fn draw_charts_and_checklist(f: &mut Frame, snap: &MaintenanceSnapshot, area: Re
             dim()
         };
 
+        let label_disp = if label.len() > avail_label_w {
+            format!("{}…", &label[..avail_label_w.saturating_sub(1)])
+        } else {
+            format!("{:<width$}", label, width = avail_label_w)
+        };
+
         lines.push(Line::from(vec![
             Span::styled(prefix, amber_bold()),
-            Span::styled(format!("{box_char} {label:<30}"), box_style),
+            Span::styled(format!("{box_char} {label_disp}"), box_style),
             Span::styled(format!(" (≈ {:.1} GB)", sz), dim()),
         ]));
     }
@@ -261,11 +283,21 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
     let sel = snap.selected_app_idx.min(n.saturating_sub(1));
 
     let title = if is_focused {
-        format!("⊞ DEEP APP UNINSTALLER & RESIDUE HUNTER  ▶ [{}/{}]", if n == 0 { 0 } else { sel + 1 }, n)
+        format!("⊞ DEEP APP UNINSTALLER & RESIDUE HUNTER  ▶ [ACTIVE FOCUS] [{}/{}]", if n == 0 { 0 } else { sel + 1 }, n)
     } else {
         format!("⊞ DEEP APP UNINSTALLER & RESIDUE HUNTER  [{}/{}]", if n == 0 { 0 } else { sel + 1 }, n)
     };
-    let block = titled_block(&title);
+    let block = if is_focused {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(amber_bold())
+            .title(Span::styled(format!(" {title} "), amber_bold()))
+    } else {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(dim())
+            .title(Span::styled(format!(" {title} "), dim()))
+    };
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -280,8 +312,14 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
     ]));
 
     // Dynamic windowed scrolling based on inner height
-    let detail_lines_count = 6;
-    let table_height = (inner.height as usize).saturating_sub(detail_lines_count + 1).max(3);
+    let detail_lines_count = 5;
+    let avail_table = (inner.height as usize).saturating_sub(detail_lines_count + 1).max(2);
+    let has_indicators = n > avail_table;
+    let table_height = if has_indicators {
+        avail_table.saturating_sub(2).max(2)
+    } else {
+        avail_table
+    };
 
     let start = if n <= table_height {
         0
@@ -294,9 +332,11 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
     };
     let end = (start + table_height).min(n);
 
-    if start > 0 {
+    if has_indicators && start > 0 {
         lines.push(Line::from(Span::styled("    ▲ ... more applications above ...", dim())));
     }
+
+    let max_name_w = (inner.width as usize).saturating_sub(38).clamp(12, 20);
 
     for i in start..end {
         if let Some(app) = snap.apps.get(i) {
@@ -306,16 +346,16 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
             let bin_mb = app.binary_bytes as f64 / (1024.0 * 1024.0);
             let res_mb = (app.total_bytes.saturating_sub(app.binary_bytes)) as f64 / (1024.0 * 1024.0);
 
-            let name_str = if app.name.len() > 19 {
-                format!("{}…", &app.name[..18])
+            let name_str = if app.name.len() > max_name_w {
+                format!("{}…", &app.name[..max_name_w.saturating_sub(1)])
             } else {
-                app.name.clone()
+                format!("{:<width$}", app.name, width = max_name_w)
             };
 
             let status_str = if app.is_orphan {
                 "DEAD RESIDUE ◄"
             } else if app.is_system_protected {
-                "System Protected"
+                "Protected"
             } else {
                 "Installed"
             };
@@ -329,7 +369,7 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
             };
 
             lines.push(Line::from(vec![
-                Span::styled(format!("{prefix}{:<21}", name_str), row_style),
+                Span::styled(format!("{prefix}{name_str} "), row_style),
                 Span::styled(format!("{:>6.0} MB   ", bin_mb), row_style),
                 Span::styled(format!("{:>6.0} MB   ", res_mb), row_style),
                 Span::styled(format!("{:<15}", status_str), row_style),
@@ -337,7 +377,7 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
         }
     }
 
-    if end < n {
+    if has_indicators && end < n {
         lines.push(Line::from(Span::styled("    ▼ ... more applications below ...", dim())));
     }
 
@@ -345,10 +385,9 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
         lines.push(Line::from(Span::styled("  (scanning /Applications for app inventory...)", dim())));
     }
 
-    lines.push(Line::from(""));
-
     // Detailed breakdown of selected app
     if let Some(selected) = snap.apps.get(sel) {
+        let max_path_w = (inner.width as usize).saturating_sub(24).max(16);
         lines.push(Line::from(Span::styled(
             format!(" DETAILED FOOTPRINT FOR: {}", selected.name),
             amber_bold(),
@@ -356,16 +395,28 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
         let tot_mb = selected.total_bytes as f64 / (1024.0 * 1024.0);
 
         if let Some(ref bin) = selected.binary_path {
+            let b_str = bin.display().to_string();
+            let b_disp = if b_str.len() > max_path_w {
+                format!("…{}", &b_str[b_str.len().saturating_sub(max_path_w.saturating_sub(1))..])
+            } else {
+                b_str
+            };
             lines.push(Line::from(vec![
-                Span::styled("  • Binary: ", dim()),
-                Span::styled(format!("{:<38}", bin.display()), amber()),
+                Span::styled("  • Binary:  ", dim()),
+                Span::styled(b_disp, amber()),
             ]));
         }
-        for (p, sz) in selected.support_paths.iter().take(2) {
+        for (p, sz) in selected.support_paths.iter().take(1) {
             let smb = *sz as f64 / (1024.0 * 1024.0);
+            let p_str = p.display().to_string();
+            let p_disp = if p_str.len() > max_path_w {
+                format!("…{}", &p_str[p_str.len().saturating_sub(max_path_w.saturating_sub(1))..])
+            } else {
+                p_str
+            };
             lines.push(Line::from(vec![
                 Span::styled("  • Residue: ", dim()),
-                Span::styled(format!("{:<30} ({:.1} MB)", p.display(), smb), dim()),
+                Span::styled(format!("{p_disp} ({smb:.1} MB)"), dim()),
             ]));
         }
         lines.push(Line::from(vec![
@@ -379,16 +430,48 @@ fn draw_app_uninstaller(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
 }
 
 fn draw_live_log(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
-    let block = titled_block("✱ LIVE MAINTENANCE CONSOLE");
+    let is_focused = snap.active_focus == 2;
+    let n = snap.log_messages.len();
+    let max_lines = (area.height as usize).saturating_sub(2);
+    let max_scroll = n.saturating_sub(max_lines);
+    let scroll = snap.log_scroll.min(max_scroll);
+    let start = max_scroll.saturating_sub(scroll);
+    let end = (start + max_lines).min(n);
+
+    let title = if is_focused {
+        format!("✱ LIVE MAINTENANCE CONSOLE  ▶ [ACTIVE FOCUS] (↑/↓ or PgUp/PgDn to scroll) [{}-{}/{}]",
+            if n == 0 { 0 } else { start + 1 },
+            end,
+            n
+        )
+    } else if snap.log_scroll > 0 {
+        format!("✱ LIVE MAINTENANCE CONSOLE  [▲ SCROLLED UP - End to return] [{}-{}/{}]",
+            if n == 0 { 0 } else { start + 1 },
+            end,
+            n
+        )
+    } else {
+        format!("✱ LIVE MAINTENANCE CONSOLE  [{}]", n)
+    };
+
+    let block = if is_focused {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(amber_bold())
+            .title(Span::styled(format!(" {title} "), amber_bold()))
+    } else {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(dim())
+            .title(Span::styled(format!(" {title} "), dim()))
+    };
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let max_lines = inner.height as usize;
-    let n = snap.log_messages.len();
-    let start = n.saturating_sub(max_lines);
-
     let mut lines = Vec::new();
-    for msg in &snap.log_messages[start..] {
+    let max_w = (inner.width as usize).saturating_sub(4);
+
+    for msg in &snap.log_messages[start..end] {
         let style = if msg.contains("[OK]") {
             good()
         } else if msg.contains("[RAM]") || msg.contains("[SSD]") {
@@ -398,7 +481,14 @@ fn draw_live_log(f: &mut Frame, snap: &MaintenanceSnapshot, area: Rect) {
         } else {
             dim()
         };
-        lines.push(Line::from(Span::styled(format!(" › {msg}"), style)));
+
+        let disp_msg = if msg.len() > max_w {
+            format!("{}…", &msg[..max_w.saturating_sub(1)])
+        } else {
+            msg.clone()
+        };
+
+        lines.push(Line::from(Span::styled(format!(" › {disp_msg}"), style)));
     }
 
     if lines.is_empty() {

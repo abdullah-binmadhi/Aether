@@ -1,7 +1,9 @@
 //! Gateway port prober. Ported from router_bot.py (login path omitted — unused by UI).
 
 use std::collections::BTreeMap;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::cmd;
@@ -15,12 +17,18 @@ pub struct RouterStatus {
 
 pub struct RouterBot {
     pub router_ip: String,
+    pub cached_status: Arc<Mutex<Option<RouterStatus>>>,
+    pub is_probing: Arc<AtomicBool>,
 }
 
 impl RouterBot {
     pub fn new(router_ip: &str) -> Self {
+        let cached = Arc::new(Mutex::new(None));
+        let is_probing = Arc::new(AtomicBool::new(false));
         RouterBot {
             router_ip: router_ip.to_string(),
+            cached_status: cached,
+            is_probing,
         }
     }
 
@@ -50,36 +58,92 @@ impl RouterBot {
 
     pub fn probe_ports(&self) -> RouterStatus {
         let ip = self.resolve_ip();
+
+        // 1. Read from background cache (< 0.005ms)
+        if let Ok(guard) = self.cached_status.lock() {
+            if let Some(status) = guard.as_ref() {
+                if status.ip == ip {
+                    return status.clone();
+                }
+            }
+        }
+
+        // 2. Spawn non-blocking background probe
+        let cached_ref = Arc::clone(&self.cached_status);
+        let probing_ref = Arc::clone(&self.is_probing);
+        let ip_clone = ip.clone();
+
+        if probing_ref.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            std::thread::spawn(move || {
+                let status = Self::perform_probe(&ip_clone);
+                if let Ok(mut guard) = cached_ref.lock() {
+                    *guard = Some(status);
+                }
+                probing_ref.store(false, Ordering::SeqCst);
+            });
+        }
+
+        // 3. Return immediate default status while background probe finishes
+        let mut ports = BTreeMap::new();
+        ports.insert("53".into(), false);
+        ports.insert("80".into(), false);
+        ports.insert("443".into(), false);
+        RouterStatus {
+            ip,
+            ports,
+            summary: "Probing Gateway Ports...".into(),
+        }
+    }
+
+    fn perform_probe(ip: &str) -> RouterStatus {
         let mut ports = BTreeMap::new();
         if ip == "N/A" {
             ports.insert("53".into(), false);
             ports.insert("80".into(), false);
             ports.insert("443".into(), false);
             return RouterStatus {
-                ip,
+                ip: ip.to_string(),
                 ports,
                 summary: "No Active Gateway".into(),
             };
         }
-        for port in [53u16, 80, 443] {
-            let open = TcpStream::connect_timeout(
-                &format!("{ip}:{port}").parse().unwrap(),
-                Duration::from_millis(400),
-            )
-            .is_ok();
+
+        // Probe ports concurrently in parallel
+        let results: Vec<(u16, bool)> = std::thread::scope(|s| {
+            let handles: Vec<_> = [53u16, 80, 443]
+                .into_iter()
+                .map(|port| {
+                    s.spawn(move || {
+                        let addr_str = format!("{ip}:{port}");
+                        let open = if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+                            TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
+                        } else {
+                            false
+                        };
+                        (port, open)
+                    })
+                })
+                .collect();
+
+            handles.into_iter().map(|h| h.join().unwrap_or((0, false))).collect()
+        });
+
+        for (port, open) in results {
             ports.insert(port.to_string(), open);
         }
-        let summary = if ports["443"] {
+
+        let summary = if ports.get("443").copied().unwrap_or(false) {
             "HTTPS (443) ONLINE — Gateway Web UI Ready"
-        } else if ports["80"] {
+        } else if ports.get("80").copied().unwrap_or(false) {
             "HTTP (80) ONLINE, HTTPS (443) Closed"
-        } else if ports["53"] {
+        } else if ports.get("53").copied().unwrap_or(false) {
             "DNS Relay (53) ONLINE (Hotspot / Gateway)"
         } else {
             "Management Ports Unreachable"
         };
+
         RouterStatus {
-            ip,
+            ip: ip.to_string(),
             ports,
             summary: summary.into(),
         }

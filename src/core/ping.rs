@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-const COOKIE: [u8; 16] = *b"wifi-tui-cockpit";
+const COOKIE: [u8; 16] = *b"aether-cockpit\0\0";
 
 fn checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;

@@ -14,6 +14,7 @@ use crate::core::channel_advisor;
 use crate::core::collector::Collector;
 use crate::core::disassoc::DisassocTracker;
 use crate::core::dns_engine::{DnsEngine, DnsResult};
+use crate::core::gaming_radar::{GamingData, GamingRadar};
 use crate::core::history::HistoryLogger;
 use crate::core::hop2;
 use crate::core::hops::ScopeSnapshot;
@@ -23,6 +24,7 @@ use crate::core::lan_scanner::{LanData, LanScanner};
 use crate::core::model::Telemetry;
 use crate::core::orchestrator::Orchestrator;
 use crate::core::preset_engine::PresetEngine;
+use crate::core::privacy_fortress::{PrivacyData, PrivacyFortress};
 use crate::core::privacy_shield::{ArpInfo, PrivacyShield};
 use crate::core::procmon::ProcMonitor;
 use crate::core::profiles::ProfileManager;
@@ -48,10 +50,13 @@ pub enum Tab {
     SpeedTest = 5,
     Device = 6,
     Maintenance = 7,
+    LanRadar = 8,
+    GamingRadar = 9,
+    PrivacyFortress = 10,
 }
 
 impl Tab {
-    pub fn all() -> [Tab; 7] {
+    pub fn all() -> [Tab; 10] {
         [
             Tab::Dashboard,
             Tab::Spectrum,
@@ -60,6 +65,9 @@ impl Tab {
             Tab::SpeedTest,
             Tab::Device,
             Tab::Maintenance,
+            Tab::LanRadar,
+            Tab::GamingRadar,
+            Tab::PrivacyFortress,
         ]
     }
     pub fn short(self, w: u16) -> &'static str {
@@ -72,6 +80,9 @@ impl Tab {
             (Tab::SpeedTest, 122..) => "[5:SPEEDTEST]",
             (Tab::Device, 122..) => "[6:DEVICE]",
             (Tab::Maintenance, 122..) => "[7:CLEAN&OPT]",
+            (Tab::LanRadar, 122..) => "[8:LAN RADAR]",
+            (Tab::GamingRadar, 122..) => "[9:GAMING]",
+            (Tab::PrivacyFortress, 122..) => "[0:PRIVACY]",
             (Tab::Dashboard, 96..) => "[1:COCK]",
             (Tab::Spectrum, 96..) => "[2:SPEC]",
             (Tab::Processes, 96..) => "[3:FIRE]",
@@ -79,6 +90,9 @@ impl Tab {
             (Tab::SpeedTest, 96..) => "[5:SPEED]",
             (Tab::Device, 96..) => "[6:DEV]",
             (Tab::Maintenance, 96..) => "[7:OPT]",
+            (Tab::LanRadar, 96..) => "[8:LAN]",
+            (Tab::GamingRadar, 96..) => "[9:GAME]",
+            (Tab::PrivacyFortress, 96..) => "[0:PRIV]",
             (Tab::Dashboard, _) => "[1:CKP]",
             (Tab::Spectrum, _) => "[2:SPC]",
             (Tab::Processes, _) => "[3:FWL]",
@@ -86,6 +100,9 @@ impl Tab {
             (Tab::SpeedTest, _) => "[5:SPD]",
             (Tab::Device, _) => "[6:DEV]",
             (Tab::Maintenance, _) => "[7:OPT]",
+            (Tab::LanRadar, _) => "[8:LAN]",
+            (Tab::GamingRadar, _) => "[9:GAM]",
+            (Tab::PrivacyFortress, _) => "[0:PRV]",
         }
     }
     pub fn next(self) -> Tab {
@@ -96,18 +113,24 @@ impl Tab {
             Tab::Tuning => Tab::SpeedTest,
             Tab::SpeedTest => Tab::Device,
             Tab::Device => Tab::Maintenance,
-            Tab::Maintenance => Tab::Dashboard,
+            Tab::Maintenance => Tab::LanRadar,
+            Tab::LanRadar => Tab::GamingRadar,
+            Tab::GamingRadar => Tab::PrivacyFortress,
+            Tab::PrivacyFortress => Tab::Dashboard,
         }
     }
     pub fn prev(self) -> Tab {
         match self {
-            Tab::Dashboard => Tab::Maintenance,
+            Tab::Dashboard => Tab::PrivacyFortress,
             Tab::Spectrum => Tab::Dashboard,
             Tab::Processes => Tab::Spectrum,
             Tab::Tuning => Tab::Processes,
             Tab::SpeedTest => Tab::Tuning,
             Tab::Device => Tab::SpeedTest,
             Tab::Maintenance => Tab::Device,
+            Tab::LanRadar => Tab::Maintenance,
+            Tab::GamingRadar => Tab::LanRadar,
+            Tab::PrivacyFortress => Tab::GamingRadar,
         }
     }
 
@@ -122,6 +145,9 @@ impl Tab {
             Tab::SpeedTest => ("▲", "SPEED TEST", 5),
             Tab::Device => ("⊞", "DEVICE INFO", 6),
             Tab::Maintenance => ("◧", "CLEAN & OPT", 7),
+            Tab::LanRadar => ("⌖", "LAN RADAR", 8),
+            Tab::GamingRadar => ("⚔", "GAMING RADAR", 9),
+            Tab::PrivacyFortress => ("⛨", "PRIVACY & DNS", 0),
         }
     }
 }
@@ -152,6 +178,8 @@ pub struct App {
     pub device_collector: crate::core::device_info::DeviceCollector,
     pub device_info: crate::core::device_info::DeviceInfo,
     pub maintenance: crate::core::maintenance::MaintenanceEngine,
+    pub gaming_radar: GamingRadar,
+    pub privacy_fortress: PrivacyFortress,
     /// Shared so a background speedtest thread can update it live while the
     /// worker keeps publishing snapshots (that's what animates the UI).
     pub speedtest: std::sync::Arc<std::sync::Mutex<SpeedtestState>>,
@@ -166,6 +194,8 @@ pub struct App {
     pub arp_info: ArpInfo,
     pub router_status: RouterStatus,
     pub lan_data: LanData,
+    pub gaming_data: GamingData,
+    pub privacy_data: PrivacyData,
     pub socket_sample: SocketSample,
 
     // UI state.
@@ -244,6 +274,13 @@ impl App {
         let device_info = device_collector.sample(interface);
         let maintenance = crate::core::maintenance::MaintenanceEngine::new();
 
+        let mut lan_scanner = LanScanner::new(interface);
+        let lan_data = lan_scanner.scan_lan(&telemetry.ipv4, &telemetry.gateway, false);
+        let mut gaming_radar = GamingRadar::new();
+        let gaming_data = gaming_radar.probe_quick_sample(false, &telemetry.gateway, 2.0);
+        let mut privacy_fortress = PrivacyFortress::new();
+        let privacy_data = privacy_fortress.sample(false);
+
         App {
             collector,
             scope,
@@ -258,7 +295,7 @@ impl App {
             disassoc: DisassocTracker::new(interface),
             hotspot: HotspotEngine::new(),
             captive: CaptivePortalEngine::new("Wi-Fi"),
-            lan_scanner: LanScanner::new(interface),
+            lan_scanner,
             shaper: BandwidthShaper::new(),
             history: HistoryLogger::new(),
             socket_matrix: SocketMatrixEngine::new(60),
@@ -269,6 +306,8 @@ impl App {
             device_collector,
             device_info,
             maintenance,
+            gaming_radar,
+            privacy_fortress,
             speedtest: std::sync::Arc::new(std::sync::Mutex::new(SpeedtestState::default())),
             telemetry,
             scope_snap,
@@ -278,12 +317,9 @@ impl App {
             dns_results: Vec::new(),
             arp_info,
             router_status,
-            lan_data: LanData {
-                devices: Vec::new(),
-                count: 0,
-                ip_conflict: false,
-                summary: "LAN Ready".into(),
-            },
+            lan_data,
+            gaming_data,
+            privacy_data,
             socket_sample: SocketSample {
                 signal_history: Vec::new(),
                 snr_history: Vec::new(),
@@ -454,6 +490,14 @@ impl App {
 
         if self.tick % 4 == 1 {
             self.lan_data = self.lan_scanner.scan_lan(&tel.ipv4, &tel.gateway, false);
+        } else if self.tick % 4 == 3 {
+            self.gaming_data = self.gaming_radar.probe_quick_sample(
+                self.game_mode.active(),
+                &tel.gateway,
+                self.lan_data.gateway_rtt_ms,
+            );
+        } else if self.tick % 8 == 2 {
+            self.privacy_data = self.privacy_fortress.sample(false);
         }
 
         // SSID/GW change -> reload.
@@ -829,17 +873,31 @@ impl App {
             palette_active: self.palette_active,
             palette_filter: self.palette_filter.clone(),
             palette_cursor: self.palette_cursor,
+            palette_total_count: palette_catalog().len(),
             palette_items: {
                 let cat = palette_catalog();
                 palette_matches(&self.palette_filter)
                     .into_iter()
-                    .map(|i| (cat[i].0.to_string(), cat[i].1.to_string()))
+                    .map(|i| {
+                        let e = &cat[i];
+                        crate::render::PaletteItem {
+                            name: e.name.to_string(),
+                            category: e.category.to_string(),
+                            desc: e.desc.to_string(),
+                            details: e.details.to_string(),
+                            impact: e.impact.to_string(),
+                            safety: e.safety.to_string(),
+                            hotkey: e.hotkey.map(|s| s.to_string()),
+                        }
+                    })
                     .collect()
             },
             game_mode_active: self.game_mode.active(),
             game_name: self.game_mode.game_name().to_string(),
             device: self.device_info.clone(),
             maintenance: self.maintenance.snapshot.clone(),
+            gaming_data: self.gaming_data.clone(),
+            privacy_data: self.privacy_data.clone(),
             active_theme_name: crate::ui::theme::theme_name().to_string(),
         }
     }
@@ -869,7 +927,7 @@ impl App {
 
         // Game Mode guard: while a game/anti-cheat is running, hard-block every
         // risky mutation (kernel sysctl writes, SIGSTOP, MTU, boost/doctor/root)
-        // so nothing wifi-tui does can trip a kernel anti-cheat like Vanguard.
+        // so nothing aether does can trip a kernel anti-cheat like Vanguard.
         if self.game_mode.active() && Self::is_risky_in_game(&action, tab) {
             self.status_msg = format!(
                 "▶ GAME MODE — '{}' blocked (anti-cheat safe). Risky tweaks are disabled while {} runs.",
@@ -889,6 +947,21 @@ impl App {
                     self.proc_cursor = (self.proc_cursor + 1).min(self.procmon.last.len() - 1);
                 } else if tab == Tab::Maintenance {
                     self.maintenance.cursor_down();
+                } else if tab == Tab::LanRadar {
+                    self.lan_scanner.cursor_down();
+                    if let Some(c) = &self.lan_scanner.cached {
+                        self.lan_data = c.clone();
+                    }
+                } else if tab == Tab::GamingRadar {
+                    self.gaming_radar.cursor_down();
+                    if let Some(c) = &self.gaming_radar.cached {
+                        self.gaming_data = c.clone();
+                    }
+                } else if tab == Tab::PrivacyFortress {
+                    self.privacy_fortress.cursor_down();
+                    if let Some(c) = &self.privacy_fortress.cached {
+                        self.privacy_data = c.clone();
+                    }
                 } else if tab == Tab::Tuning {
                     let rows = self.build_tune_rows();
                     let sel = App::tune_selectable(&rows);
@@ -903,6 +976,21 @@ impl App {
                     self.proc_cursor = self.proc_cursor.saturating_sub(1);
                 } else if tab == Tab::Maintenance {
                     self.maintenance.cursor_up();
+                } else if tab == Tab::LanRadar {
+                    self.lan_scanner.cursor_up();
+                    if let Some(c) = &self.lan_scanner.cached {
+                        self.lan_data = c.clone();
+                    }
+                } else if tab == Tab::GamingRadar {
+                    self.gaming_radar.cursor_up();
+                    if let Some(c) = &self.gaming_radar.cached {
+                        self.gaming_data = c.clone();
+                    }
+                } else if tab == Tab::PrivacyFortress {
+                    self.privacy_fortress.cursor_up();
+                    if let Some(c) = &self.privacy_fortress.cached {
+                        self.privacy_data = c.clone();
+                    }
                 } else if tab == Tab::Tuning {
                     let rows = self.build_tune_rows();
                     let sel = App::tune_selectable(&rows);
@@ -1412,13 +1500,116 @@ impl App {
                 }
             }
             MaintenanceToggleFocus => {
-                self.maintenance.toggle_focus();
-                let f_str = if self.maintenance.active_focus == 0 {
-                    "Focused: Interactive Checklist & Safety Tier"
-                } else {
-                    "Focused: App Inventory & Leftovers"
+                self.maintenance.focus_next();
+                let f_str = match self.maintenance.active_focus {
+                    0 => "Focused: [1] Interactive Checklist & Safety Tier",
+                    1 => "Focused: [2] Deep App Uninstaller & Residue Hunter",
+                    _ => "Focused: [3] Live Maintenance Console (↑/↓ or PgUp/PgDn to scroll)",
                 };
                 self.status_msg = f_str.into();
+            }
+            MaintenanceFocusPrev => {
+                self.maintenance.focus_prev();
+                let f_str = match self.maintenance.active_focus {
+                    0 => "Focused: [1] Interactive Checklist & Safety Tier",
+                    1 => "Focused: [2] Deep App Uninstaller & Residue Hunter",
+                    _ => "Focused: [3] Live Maintenance Console (↑/↓ or PgUp/PgDn to scroll)",
+                };
+                self.status_msg = f_str.into();
+            }
+            PageUp => {
+                if self.active_tab == Tab::Maintenance {
+                    self.maintenance.scroll_log_up(6);
+                    self.status_msg = "Console: scrolled up (older logs)".into();
+                }
+            }
+            PageDown => {
+                if self.active_tab == Tab::Maintenance {
+                    self.maintenance.scroll_log_down(6);
+                    self.status_msg = "Console: scrolled down (newer logs)".into();
+                }
+            }
+            Home => {
+                if self.active_tab == Tab::Maintenance {
+                    self.maintenance.scroll_log_home();
+                    self.status_msg = "Console: scrolled to oldest log".into();
+                }
+            }
+            End => {
+                if self.active_tab == Tab::Maintenance {
+                    self.maintenance.scroll_log_end();
+                    self.status_msg = "Console: pinned to latest live log".into();
+                }
+            }
+            LanPortScan => {
+                if let Some((ip, ports)) = self.lan_scanner.port_scan_selected() {
+                    self.status_msg = format!("[OK] Port probe complete for {ip}: {} open services", ports.len());
+                    if let Some(c) = &self.lan_scanner.cached {
+                        self.lan_data = c.clone();
+                    }
+                } else {
+                    self.status_msg = "[!] No host selected to scan".into();
+                }
+            }
+            LanToggleTrust => {
+                self.lan_scanner.toggle_trust_selected();
+                if let Some(c) = &self.lan_scanner.cached {
+                    self.lan_data = c.clone();
+                }
+                self.status_msg = "[OK] Host trust status updated".into();
+            }
+            GamingCycleFilter => {
+                self.gaming_radar.cycle_filter();
+                if let Some(c) = &self.gaming_radar.cached {
+                    self.gaming_data = c.clone();
+                }
+                self.status_msg = format!("Gaming Filter: {}", self.gaming_radar.active_filter.label());
+            }
+            GamingToggleShield => {
+                let active = self.game_mode.active();
+                let iface = self.lan_scanner.interface.clone();
+                if active {
+                    let msg = crate::core::game_mode::exit(&mut self.game_mode, &iface);
+                    self.status_msg = format!("Game Shield Deactivated: {msg}");
+                } else {
+                    let msg = crate::core::game_mode::enter(&mut self.game_mode, &iface, "Manual Priority Shield".to_string());
+                    self.status_msg = format!("Game Shield Activated: {msg}");
+                }
+                self.gaming_data = self.gaming_radar.probe_quick_sample(
+                    self.game_mode.active(),
+                    &self.telemetry.gateway,
+                    self.lan_data.gateway_rtt_ms,
+                );
+            }
+            GamingRescan => {
+                self.gaming_radar.trigger_rescan();
+                self.gaming_data = self.gaming_radar.probe_quick_sample(
+                    self.game_mode.active(),
+                    &self.telemetry.gateway,
+                    self.lan_data.gateway_rtt_ms,
+                );
+                self.status_msg = "Probing global game servers in background...".into();
+            }
+            DnsRace => {
+                self.privacy_fortress.trigger_race();
+                self.privacy_data = self.privacy_fortress.sample(false);
+                self.status_msg = "Racing DNS resolvers via UDP port 53 in background...".into();
+            }
+            DnsApplySelected => {
+                let msg = self.privacy_fortress.apply_selected_dns("Wi-Fi");
+                self.status_msg = msg;
+                self.privacy_data = self.privacy_fortress.sample(false);
+            }
+            DnsResetDhcp => {
+                let msg = self.privacy_fortress.reset_to_dhcp("Wi-Fi");
+                self.status_msg = msg;
+                self.privacy_data = self.privacy_fortress.sample(false);
+            }
+            PrivacyToggleColumn => {
+                self.privacy_fortress.toggle_column();
+                if let Some(c) = &self.privacy_fortress.cached {
+                    self.privacy_data = c.clone();
+                }
             }
         }
     }
@@ -1431,6 +1622,27 @@ impl App {
                 }
             }
             Tab::Tuning => self.run_selected_tune_row(),
+            Tab::PrivacyFortress => {
+                let msg = self.privacy_fortress.apply_selected_dns("Wi-Fi");
+                self.status_msg = msg;
+                self.privacy_data = self.privacy_fortress.sample(false);
+            }
+            Tab::GamingRadar => {
+                let active = self.game_mode.active();
+                let iface = self.lan_scanner.interface.clone();
+                if active {
+                    let msg = crate::core::game_mode::exit(&mut self.game_mode, &iface);
+                    self.status_msg = format!("Game Shield Deactivated: {msg}");
+                } else {
+                    let msg = crate::core::game_mode::enter(&mut self.game_mode, &iface, "Manual Priority Shield".to_string());
+                    self.status_msg = format!("Game Shield Activated: {msg}");
+                }
+                self.gaming_data = self.gaming_radar.probe_quick_sample(
+                    self.game_mode.active(),
+                    &self.telemetry.gateway,
+                    self.lan_data.gateway_rtt_ms,
+                );
+            }
             Tab::Maintenance => {
                 if let Some(msg) = self.maintenance.toggle_checklist_item() {
                     self.status_msg = msg;
@@ -1487,95 +1699,268 @@ impl App {
     }
 }
 
-/// Every command exposed in the action palette: (name, description).
+/// Rich metadata entry in the Action Palette catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteEntry {
+    pub name: &'static str,
+    pub category: &'static str,
+    pub desc: &'static str,
+    pub details: &'static str,
+    pub impact: &'static str,
+    pub safety: &'static str,
+    pub hotkey: Option<&'static str>,
+}
+
+pub static PALETTE_CATALOG: [PaletteEntry; 27] = [
+    PaletteEntry {
+        name: "WAN & YouTube Doctor",
+        category: "NETWORK",
+        desc: "Diagnose & heal DNS, MTU, IPv6, gateway (8 stages)",
+        details: "Runs an 8-stage diagnostic and automated repair sequence targeting DNS packet drops, MTU black holes, and IPv6 routing stalls.",
+        impact: "DNS latency -15ms, zero packet drops, clean routes",
+        safety: "● Anti-Cheat Safe (Read/Repair)",
+        hotkey: Some("[D] Dashboard"),
+    },
+    PaletteEntry {
+        name: "God-Mode Boost",
+        category: "OPTIMIZE",
+        desc: "Apply every optimization at once",
+        details: "Applies all recommended macOS network and socket optimizations concurrently for peak link throughput and responsiveness.",
+        impact: "Max throughput, minimal bufferbloat & VIP queues",
+        safety: "● Anti-Cheat Safe (Kernel-safe)",
+        hotkey: Some("[B] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Toggle Zero-Lag Mode",
+        category: "GAMING",
+        desc: "Silence AWDL/AirDrop + pause sync daemons",
+        details: "Silences Apple Wireless Direct Link (AirDrop/Sidecar background scanning) and pauses cloud sync daemons during gaming sessions.",
+        impact: "Eliminates periodic AWDL Wi-Fi ping spikes (0ms jitter)",
+        safety: "● Anti-Cheat Safe (Link-only)",
+        hotkey: Some("[Z] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Toggle WMM VIP Priority",
+        category: "NETWORK",
+        desc: "802.11e voice/video airtime priority",
+        details: "Enables 802.11e QoS DSCP prioritization so interactive gaming and VoIP packets jump ahead of bulk background downloads.",
+        impact: "Prioritizes packets on congested 802.11 airwaves",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[W] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Toggle CAM Pacer",
+        category: "GAMING",
+        desc: "25Hz anti-sleep radio heartbeat",
+        details: "Dispatches a lightweight 25Hz anti-sleep radio heartbeat keeping the 802.11 physical link in Constantly Awake Mode (CAM).",
+        impact: "Prevents Wi-Fi radio sleep (prevents 100ms wakeup stalls)",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[C] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Toggle Gaming TCP No-Delay",
+        category: "GAMING",
+        desc: "delayed_ack=0 + fast retransmit",
+        details: "Sets TCP delayed ACK to 0 and tunes fast retransmit thresholds for immediate packet departure in online games.",
+        impact: "Removes 40ms Nagle algorithm packet buffering",
+        safety: "● Anti-Cheat Safe (Kernel sysctl)",
+        hotkey: Some("[N] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Toggle 32MB Buffers",
+        category: "NETWORK",
+        desc: "High-BDP TCP window for 4K/large transfers",
+        details: "Expands default TCP socket send/receive buffer ceilings to 32MB, maximizing multi-gigabit throughput over high-bandwidth links.",
+        impact: "Unlocks maximum line-rate throughput on fiber",
+        safety: "● Anti-Cheat Safe",
+        hotkey: None,
+    },
+    PaletteEntry {
+        name: "Toggle IPv6 Guard",
+        category: "NETWORK",
+        desc: "Force clean IPv4 routing",
+        details: "Forces clean IPv4 routing precedence if your ISP or local network has broken, erratic, or high-latency dual-stack IPv6 routing.",
+        impact: "Eliminates IPv6 timeout fallback delay",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[6] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Toggle QUIC Fast-Path",
+        category: "NETWORK",
+        desc: "Force TCP HTTP/2 over UDP QUIC",
+        details: "Controls HTTP/3 QUIC vs HTTP/2 TCP fallback behavior to prevent throttled UDP packet drops on restricted firewalls.",
+        impact: "Prevents UDP QUIC throttling on congested networks",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[Q] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Hop-2 Anti-Bloat Repair",
+        category: "NETWORK",
+        desc: "Refresh gateway ARP + fast-ACK + WMM",
+        details: "Refreshes second-hop gateway ARP bindings and flushes route caches to eliminate upstream bufferbloat and hop jitter.",
+        impact: "Clears gateway ARP jitter & stale route tables",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[H] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Reap Zombie Sockets",
+        category: "SYSTEM",
+        desc: "Flush stuck CLOSE_WAIT/FIN sockets + sync",
+        details: "Scans for and purges lingering CLOSE_WAIT and FIN_WAIT sockets to restore system socket capacity and reclaim file handles.",
+        impact: "Frees orphaned file descriptors and port leaks",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[K] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Fix macOS \"!\" Mark",
+        category: "NETWORK",
+        desc: "Restore DHCP DNS + refresh Wi-Fi agent",
+        details: "Restores DHCP DNS configurations and cycles the macOS airport core agent without disconnecting your physical link.",
+        impact: "Clears Wi-Fi exclamation mark & captive locks",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[!] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Clamp MTU (1492/1500)",
+        category: "NETWORK",
+        desc: "Toggle fiber/PPPoE fragmentation clamp",
+        details: "Toggles link MTU clamp between 1492 and 1500 bytes to prevent IP header fragmentation over encapsulated PPPoE lines.",
+        impact: "Prevents packet fragmentation on PPPoE / Fiber",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[M] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Pre-warm CDN Edges",
+        category: "OPTIMIZE",
+        desc: "Warm YouTube/AI/gaming TLS handshakes",
+        details: "Pre-warms TCP/TLS handshakes and DNS caches for major CDN edges (YouTube, Cloudflare, OpenAI, Akamai) for snappy page loads.",
+        impact: "Eliminates initial TLS handshake latency on video/AI",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[P] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Verify Private MAC",
+        category: "PRIVACY",
+        desc: "Confirm link-safe private Wi-Fi address",
+        details: "Inspects link hardware address and verifies private MAC address rotation status for public hotspot tracking protection.",
+        impact: "Protects hardware BSSID privacy on public networks",
+        safety: "● Anti-Cheat Safe",
+        hotkey: None,
+    },
+    PaletteEntry {
+        name: "Cycle Preset",
+        category: "PRESET",
+        desc: "Switch to the next mission profile",
+        details: "Cycles active engine optimization preset between Esports Gaming, 4K Streaming, VoIP Conference, and Balanced profiles.",
+        impact: "Switches mission profiles (Gaming, 4K, VoIP)",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[T] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Toggle Auto-Pilot",
+        category: "PRESET",
+        desc: "Let the engine auto-apply the best preset",
+        details: "Enables autonomous heuristic switching to automatically apply network presets based on active foreground application detection.",
+        impact: "Automated real-time network adaptation",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[A] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Captive / Gateway Probe",
+        category: "DIAGNOSTICS",
+        desc: "Check captive portal + gateway ports",
+        details: "Probes default gateway HTTP/HTTPS endpoints and captive portal walled-gardens to test internet reachability and login status.",
+        impact: "Identifies captive portals and open gateway ports",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[G] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Roam & Rescan Airspace",
+        category: "DIAGNOSTICS",
+        desc: "Smart BSSID roam + spectrum rescan",
+        details: "Scans all 2.4/5/6 GHz channels and prompts the Wi-Fi card to re-associate with the highest RSSI BSSID node available.",
+        impact: "Forces connection to strongest Wi-Fi AP node",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[R] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Export Diagnostic Ticket",
+        category: "DIAGNOSTICS",
+        desc: "Write a Markdown ISP report",
+        details: "Compiles link metrics, DNS health, packet loss, and bufferbloat results into a shareable Markdown ISP diagnostic report.",
+        impact: "Generates exportable ISP / IT troubleshooting report",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[E] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Full Speed Test",
+        category: "BENCHMARK",
+        desc: "Multi-stream download/upload + bufferbloat",
+        details: "Executes a multi-stream throughput benchmark measuring sustained download/upload speeds and loaded latency bufferbloat spikes.",
+        impact: "Measures bandwidth & loaded bufferbloat latency",
+        safety: "● Anti-Cheat Safe",
+        hotkey: Some("[S] Dashboard"),
+    },
+    PaletteEntry {
+        name: "Quick 5s Speed Burst",
+        category: "BENCHMARK",
+        desc: "Fast throughput sample",
+        details: "Runs an abbreviated 5-second bandwidth probe to verify line responsiveness without saturating ISP data caps.",
+        impact: "Rapid network capacity health check (5s)",
+        safety: "● Anti-Cheat Safe",
+        hotkey: None,
+    },
+    PaletteEntry {
+        name: "Apple RPM Benchmark",
+        category: "BENCHMARK",
+        desc: "networkQuality responsiveness test",
+        details: "Invokes macOS networkQuality test to measure working roundtrips per minute under bidirectional traffic saturation.",
+        impact: "Measures Apple Network Roundtrips Per Minute (RPM)",
+        safety: "● Anti-Cheat Safe",
+        hotkey: None,
+    },
+    PaletteEntry {
+        name: "Root Authorization",
+        category: "SYSTEM",
+        desc: "Install passwordless sudoers for kernel tuning",
+        details: "Configures passwordless sudoers entry for Aether helper scripts to allow low-latency kernel tuning without password prompts.",
+        impact: "Enables passwordless kernel sysctl writes",
+        safety: "⚡ Root Required (Sudoers)",
+        hotkey: None,
+    },
+    PaletteEntry {
+        name: "Cycle Color Theme",
+        category: "INTERFACE",
+        desc: "Switch between 10 high-contrast themes (Amber, Neon, Tokyo, etc.)",
+        details: "Cycles through all 10 high-contrast terminal palettes (Aether Amber, Tokyo Night, Cyber Neon, Monokai, Nord, etc.).",
+        impact: "Instantly updates terminal aesthetic & contrast",
+        safety: "● Anti-Cheat Safe (Visual)",
+        hotkey: Some("[F2] Global"),
+    },
+    PaletteEntry {
+        name: "Purge Inactive RAM",
+        category: "SYSTEM",
+        desc: "Zero-touch safe inactive Mach VM cache flush",
+        details: "Flushes dormant file system cache pages and unreferenced Mach VM memory back to free memory pool safely.",
+        impact: "Reclaims gigabytes of inactive OS page cache",
+        safety: "● Anti-Cheat Safe (Zero-touch VM)",
+        hotkey: None,
+    },
+    PaletteEntry {
+        name: "Thin APFS Snapshots",
+        category: "STORAGE",
+        desc: "Reclaim multi-GB local Time Machine snapshots",
+        details: "Thins accumulated local APFS snapshot backups to instantly reclaim gigabytes of solid-state drive storage.",
+        impact: "Frees local disk space held by Time Machine deltas",
+        safety: "● Anti-Cheat Safe (APFS-safe)",
+        hotkey: None,
+    },
+];
+
+/// Every command exposed in the action palette.
 /// The index into this list maps to an `Action` via `palette_action()`.
-pub fn palette_catalog() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            "WAN & YouTube Doctor",
-            "Diagnose & heal DNS, MTU, IPv6, gateway (8 stages)",
-        ),
-        ("God-Mode Boost", "Apply every optimization at once"),
-        (
-            "Toggle Zero-Lag Mode",
-            "Silence AWDL/AirDrop + pause sync daemons",
-        ),
-        (
-            "Toggle WMM VIP Priority",
-            "802.11e voice/video airtime priority",
-        ),
-        ("Toggle CAM Pacer", "25Hz anti-sleep radio heartbeat"),
-        (
-            "Toggle Gaming TCP No-Delay",
-            "delayed_ack=0 + fast retransmit",
-        ),
-        (
-            "Toggle 32MB Buffers",
-            "High-BDP TCP window for 4K/large transfers",
-        ),
-        ("Toggle IPv6 Guard", "Force clean IPv4 routing"),
-        ("Toggle QUIC Fast-Path", "Force TCP HTTP/2 over UDP QUIC"),
-        (
-            "Hop-2 Anti-Bloat Repair",
-            "Refresh gateway ARP + fast-ACK + WMM",
-        ),
-        (
-            "Reap Zombie Sockets",
-            "Flush stuck CLOSE_WAIT/FIN sockets + sync",
-        ),
-        (
-            "Fix macOS \"!\" Mark",
-            "Restore DHCP DNS + refresh Wi-Fi agent",
-        ),
-        (
-            "Clamp MTU (1492/1500)",
-            "Toggle fiber/PPPoE fragmentation clamp",
-        ),
-        (
-            "Pre-warm CDN Edges",
-            "Warm YouTube/AI/gaming TLS handshakes",
-        ),
-        (
-            "Verify Private MAC",
-            "Confirm link-safe private Wi-Fi address",
-        ),
-        ("Cycle Preset", "Switch to the next mission profile"),
-        (
-            "Toggle Auto-Pilot",
-            "Let the engine auto-apply the best preset",
-        ),
-        (
-            "Captive / Gateway Probe",
-            "Check captive portal + gateway ports",
-        ),
-        (
-            "Roam & Rescan Airspace",
-            "Smart BSSID roam + spectrum rescan",
-        ),
-        ("Export Diagnostic Ticket", "Write a Markdown ISP report"),
-        (
-            "Full Speed Test",
-            "Multi-stream download/upload + bufferbloat",
-        ),
-        ("Quick 5s Speed Burst", "Fast throughput sample"),
-        ("Apple RPM Benchmark", "networkQuality responsiveness test"),
-        (
-            "Root Authorization",
-            "Install passwordless sudoers for kernel tuning",
-        ),
-        (
-            "Cycle Color Theme",
-            "Switch between 10 high-contrast themes (Amber, Neon, Tokyo, etc.)",
-        ),
-        (
-            "Purge Inactive RAM",
-            "Zero-touch safe inactive Mach VM cache flush",
-        ),
-        (
-            "Thin APFS Snapshots",
-            "Reclaim multi-GB local Time Machine snapshots",
-        ),
-    ]
+pub fn palette_catalog() -> &'static [PaletteEntry] {
+    &PALETTE_CATALOG
 }
 
 /// Map a palette catalog index to the `Action` it fires.
@@ -1614,14 +1999,19 @@ pub fn palette_action(idx: usize) -> Option<Action> {
 }
 
 /// Catalog indices that match the current fuzzy filter (case-insensitive
-/// subsequence on the name + description).
+/// subsequence on the name, description, category, and details).
 pub fn palette_matches(filter: &str) -> Vec<usize> {
-    let f = filter.to_lowercase();
+    let f = filter.trim().to_lowercase();
     palette_catalog()
         .iter()
         .enumerate()
-        .filter(|(_, (name, desc))| {
-            f.is_empty() || subseq(&f, &name.to_lowercase()) || desc.to_lowercase().contains(&f)
+        .filter(|(_, item)| {
+            f.is_empty()
+                || subseq(&f, &item.name.to_lowercase())
+                || item.name.to_lowercase().contains(&f)
+                || item.desc.to_lowercase().contains(&f)
+                || item.category.to_lowercase().contains(&f)
+                || item.details.to_lowercase().contains(&f)
         })
         .map(|(i, _)| i)
         .collect()
@@ -1762,6 +2152,23 @@ pub enum Action {
     UninstallSelectedApp,
     ToggleMaintenanceTarget(usize),
     MaintenanceToggleFocus,
+    MaintenanceFocusPrev,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    // LAN Radar actions.
+    LanPortScan,
+    LanToggleTrust,
+    // Gaming Radar actions.
+    GamingCycleFilter,
+    GamingToggleShield,
+    GamingRescan,
+    // Privacy Fortress actions.
+    DnsRace,
+    DnsApplySelected,
+    DnsResetDhcp,
+    PrivacyToggleColumn,
 }
 
 #[cfg(test)]
@@ -1851,15 +2258,27 @@ mod perf_tests {
 
     #[test]
     fn tab_device_navigation_and_mascot() {
-        assert_eq!(Tab::all().len(), 7);
+        assert_eq!(Tab::all().len(), 10);
         assert_eq!(Tab::SpeedTest.next(), Tab::Device);
         assert_eq!(Tab::Device.next(), Tab::Maintenance);
-        assert_eq!(Tab::Maintenance.next(), Tab::Dashboard);
-        assert_eq!(Tab::Dashboard.prev(), Tab::Maintenance);
+        assert_eq!(Tab::Maintenance.next(), Tab::LanRadar);
+        assert_eq!(Tab::LanRadar.next(), Tab::GamingRadar);
+        assert_eq!(Tab::GamingRadar.next(), Tab::PrivacyFortress);
+        assert_eq!(Tab::PrivacyFortress.next(), Tab::Dashboard);
+        assert_eq!(Tab::Dashboard.prev(), Tab::PrivacyFortress);
+        assert_eq!(Tab::PrivacyFortress.prev(), Tab::GamingRadar);
+        assert_eq!(Tab::GamingRadar.prev(), Tab::LanRadar);
+        assert_eq!(Tab::LanRadar.prev(), Tab::Maintenance);
         assert_eq!(Tab::Maintenance.prev(), Tab::Device);
         assert_eq!(Tab::Device.prev(), Tab::SpeedTest);
 
         let mut app = App::new("en0", Arc::new(AtomicBool::new(false)));
+        app.apply_action(Action::SwitchTab(Tab::PrivacyFortress));
+        assert_eq!(app.active_tab, Tab::PrivacyFortress);
+        app.apply_action(Action::SwitchTab(Tab::GamingRadar));
+        assert_eq!(app.active_tab, Tab::GamingRadar);
+        app.apply_action(Action::SwitchTab(Tab::LanRadar));
+        assert_eq!(app.active_tab, Tab::LanRadar);
         app.apply_action(Action::SwitchTab(Tab::Device));
         assert_eq!(app.active_tab, Tab::Device);
 
@@ -1877,5 +2296,50 @@ mod perf_tests {
         assert_eq!(rs.active_tab, Tab::Maintenance);
         assert_eq!(rs.device.mascot_visible, !initial_mascot);
         assert!(!rs.active_theme_name.is_empty());
+    }
+
+    #[test]
+    fn palette_and_tab_switching_zero_lag() {
+        let mut app = App::new("en0", Arc::new(AtomicBool::new(false)));
+
+        // 1. Action Palette open & typing must be sub-millisecond
+        let t0 = std::time::Instant::now();
+        app.apply_action(Action::PaletteOpen);
+        assert!(app.palette_active);
+        let open_time = t0.elapsed();
+        assert!(open_time < std::time::Duration::from_millis(5), "PaletteOpen took {:?}", open_time);
+
+        let t1 = std::time::Instant::now();
+        for c in "doctor".chars() {
+            app.apply_action(Action::PaletteChar(c));
+        }
+        assert_eq!(app.palette_filter, "doctor");
+        let type_time = t1.elapsed();
+        assert!(type_time < std::time::Duration::from_millis(5), "Typing in palette took {:?}", type_time);
+
+        app.apply_action(Action::PaletteClose);
+        assert!(!app.palette_active);
+
+        // 2. Tab switching through all 10 tabs must be instantaneous
+        let t2 = std::time::Instant::now();
+        for tab in Tab::all() {
+            app.apply_action(Action::SwitchTab(tab));
+            assert_eq!(app.active_tab, tab);
+        }
+        let tab_switch_time = t2.elapsed();
+        assert!(
+            tab_switch_time < std::time::Duration::from_millis(10),
+            "Switching all 10 tabs took {:?}",
+            tab_switch_time
+        );
+
+        // 3. Gaming Radar and Privacy navigation must be instantaneous
+        app.apply_action(Action::SwitchTab(Tab::GamingRadar));
+        let t3 = std::time::Instant::now();
+        app.apply_action(Action::CursorDown);
+        app.apply_action(Action::CursorDown);
+        app.apply_action(Action::GamingCycleFilter);
+        let nav_time = t3.elapsed();
+        assert!(nav_time < std::time::Duration::from_millis(5), "Gaming radar navigation took {:?}", nav_time);
     }
 }

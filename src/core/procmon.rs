@@ -39,6 +39,7 @@ pub const PROTECTED: &[&str] = &[
     "mDNSResponder",
     "configd",
     "airportd",
+    "aether",
     "wifi-tui",
     "kitty",
     "Terminal",

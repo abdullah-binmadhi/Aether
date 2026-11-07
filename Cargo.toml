@@ -1,15 +1,15 @@
 [package]
-name = "wifi-tui"
+name = "aether"
 version = "2.0.0"
 edition = "2021"
-description = "Amber CRT macOS Wi-Fi Cockpit: RF telemetry, 4-hop bufferbloat matrix, spectrum radar & per-process firewall — native Rust rebuild"
+description = "Aether — Native System, Silicon & Network Cockpit in Rust"
 license = "MIT"
 authors = ["Abdullah Bin Madhi"]
 readme = "README.md"
-repository = "https://github.com/abdullah-binmadhi/WIFI-TUI"
+repository = "https://github.com/abdullah-binmadhi/AETHER"
 
 [[bin]]
-name = "wifi-tui"
+name = "aether"
 path = "src/main.rs"
 
 [dependencies]

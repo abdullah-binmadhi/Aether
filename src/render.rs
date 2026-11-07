@@ -6,7 +6,9 @@
 
 use crate::app::Tab;
 use crate::core::dns_engine::DnsResult;
+use crate::core::gaming_radar::GamingData;
 use crate::core::lan_scanner::LanData;
+use crate::core::privacy_fortress::PrivacyData;
 use crate::core::model::Telemetry;
 use crate::core::preset_engine::{CockpitAnalysis, Control};
 use crate::core::privacy_shield::ArpInfo;
@@ -83,8 +85,8 @@ pub struct RenderState {
     pub palette_active: bool,
     pub palette_filter: String,
     pub palette_cursor: usize,
-    /// (name, description) of the currently matching commands, in order.
-    pub palette_items: Vec<(String, String)>,
+    pub palette_total_count: usize,
+    pub palette_items: Vec<PaletteItem>,
 
     /// Automatic Game Mode: active flag + detected game name, for the UI badge.
     pub game_mode_active: bool,
@@ -95,6 +97,10 @@ pub struct RenderState {
 
     /// Tab 7: Zero-Touch Maintenance & Device Optimizer
     pub maintenance: crate::core::maintenance::MaintenanceSnapshot,
+    /// Tab 9: Gaming & Esports Ping Radar
+    pub gaming_data: GamingData,
+    /// Tab 10: Privacy Fortress & DNS Racer
+    pub privacy_data: PrivacyData,
     pub active_theme_name: String,
 }
 
@@ -128,4 +134,16 @@ pub enum TuneKind {
     Toggle,
     /// A one-shot "RUN" action.
     Run,
+}
+
+/// Rich metadata for an action in the Action Palette overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteItem {
+    pub name: String,
+    pub category: String,
+    pub desc: String,
+    pub details: String,
+    pub impact: String,
+    pub safety: String,
+    pub hotkey: Option<String>,
 }

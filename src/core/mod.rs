@@ -14,6 +14,7 @@ pub mod device_info;
 pub mod disassoc;
 pub mod dns_engine;
 pub mod game_mode;
+pub mod gaming_radar;
 pub mod gateway;
 pub mod health;
 pub mod history;
@@ -29,6 +30,7 @@ pub mod ping;
 pub mod pmtu;
 pub mod power_hook;
 pub mod preset_engine;
+pub mod privacy_fortress;
 pub mod privacy_shield;
 pub mod procmon;
 pub mod profiles;
@@ -141,13 +143,25 @@ impl PingScope {
         let gw = parse_v4(&self.gateway_ip);
         let isp = parse_v4(&self.isp_ip);
         let cloud = parse_v4(&self.cloud_ip);
+        let seq = self.seq;
 
-        let gw_rtt =
-            gw.and_then(|ip| ping::ping_once(ip, self.seq, Duration::from_millis(350)).map(ms));
-        let isp_rtt =
-            isp.and_then(|ip| ping::ping_once(ip, self.seq, Duration::from_millis(600)).map(ms));
-        let cloud_rtt =
-            cloud.and_then(|ip| ping::ping_once(ip, self.seq, Duration::from_millis(750)).map(ms));
+        // Probe all 3 remote hops concurrently in parallel threads
+        let (gw_rtt, isp_rtt, cloud_rtt) = std::thread::scope(|s| {
+            let h_gw = s.spawn(move || {
+                gw.and_then(|ip| ping::ping_once(ip, seq, Duration::from_millis(200)).map(ms))
+            });
+            let h_isp = s.spawn(move || {
+                isp.and_then(|ip| ping::ping_once(ip, seq, Duration::from_millis(300)).map(ms))
+            });
+            let h_cloud = s.spawn(move || {
+                cloud.and_then(|ip| ping::ping_once(ip, seq, Duration::from_millis(400)).map(ms))
+            });
+            (
+                h_gw.join().unwrap_or(None),
+                h_isp.join().unwrap_or(None),
+                h_cloud.join().unwrap_or(None),
+            )
+        });
 
         self.hop2.record(gw_rtt);
         self.hop3.record(isp_rtt);

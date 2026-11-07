@@ -1,7 +1,10 @@
 pub mod dashboard;
 pub mod device;
+pub mod gaming_radar;
+pub mod lan_radar;
 pub mod maintenance;
 pub mod optimizer;
+pub mod privacy_fortress;
 pub mod processes;
 pub mod spectrum;
 pub mod speedtest;

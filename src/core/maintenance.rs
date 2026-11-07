@@ -62,6 +62,7 @@ pub struct MaintenanceSnapshot {
     pub ram_active_gb: f64,
     pub ram_wired_gb: f64,
     pub ram_free_gb: f64,
+    pub ram_total_gb: f64,
     pub ssd_reclaimable_gb: f64,
     pub ssd_snapshots_gb: f64,
     pub ssd_dev_cache_gb: f64,
@@ -70,11 +71,12 @@ pub struct MaintenanceSnapshot {
     pub apps: Vec<AppInspection>,
     pub selected_app_idx: usize,
     pub checklist_cursor: usize,
-    pub active_focus: u8, // 0 = Left/Checklist, 1 = Right/AppList
+    pub active_focus: u8, // 0 = Left/Checklist, 1 = Right/AppList, 2 = Bottom/Console
     pub target_checks: [bool; 5],
     pub active_safety_level: u8,
     pub active_kind: u8,
     pub log_messages: Vec<String>,
+    pub log_scroll: usize, // 0 = pinned to newest bottom, >0 = lines scrolled up
     pub is_running: bool,
     pub mascot_visible: bool,
 }
@@ -84,10 +86,11 @@ pub struct MaintenanceEngine {
     pub active_kind: OptimizationKind,
     pub selected_app_idx: usize,
     pub checklist_cursor: usize,
-    pub active_focus: u8, // 0 = Left/Checklist, 1 = Right/AppList
+    pub active_focus: u8, // 0 = Left/Checklist, 1 = Right/AppList, 2 = Bottom/Console
     pub target_checks: [bool; 5],
     pub snapshot: MaintenanceSnapshot,
     pub log_messages: Vec<String>,
+    pub log_scroll: usize,
     pub mascot_visible: bool,
 }
 
@@ -110,6 +113,7 @@ impl MaintenanceEngine {
             log_messages: vec![
                 format!("{} System Maintenance ready. Zero-Touch mode active (Zen Browser & CLI sessions protected).", chrono_time()),
             ],
+            log_scroll: 0,
             mascot_visible: true,
         };
         eng.rescan();
@@ -117,28 +121,78 @@ impl MaintenanceEngine {
     }
 
     pub fn toggle_focus(&mut self) {
-        self.active_focus = if self.active_focus == 0 { 1 } else { 0 };
+        self.focus_next();
+    }
+
+    pub fn focus_next(&mut self) {
+        self.active_focus = (self.active_focus + 1) % 3;
         self.snapshot.active_focus = self.active_focus;
     }
 
+    pub fn focus_prev(&mut self) {
+        self.active_focus = if self.active_focus == 0 { 2 } else { self.active_focus - 1 };
+        self.snapshot.active_focus = self.active_focus;
+    }
+
+    pub fn scroll_log_up(&mut self, amount: usize) {
+        let max_lines = 7;
+        let max_scroll = self.log_messages.len().saturating_sub(max_lines);
+        self.log_scroll = (self.log_scroll + amount).min(max_scroll);
+        self.snapshot.log_scroll = self.log_scroll;
+    }
+
+    pub fn scroll_log_down(&mut self, amount: usize) {
+        self.log_scroll = self.log_scroll.saturating_sub(amount);
+        self.snapshot.log_scroll = self.log_scroll;
+    }
+
+    pub fn scroll_log_home(&mut self) {
+        let max_lines = 7;
+        self.log_scroll = self.log_messages.len().saturating_sub(max_lines);
+        self.snapshot.log_scroll = self.log_scroll;
+    }
+
+    pub fn scroll_log_end(&mut self) {
+        self.log_scroll = 0;
+        self.snapshot.log_scroll = 0;
+    }
+
     pub fn cursor_up(&mut self) {
-        if self.active_focus == 0 {
-            self.checklist_cursor = self.checklist_cursor.saturating_sub(1);
-        } else {
-            self.selected_app_idx = self.selected_app_idx.saturating_sub(1);
+        match self.active_focus {
+            0 => {
+                self.checklist_cursor = self.checklist_cursor.saturating_sub(1);
+            }
+            1 => {
+                self.selected_app_idx = self.selected_app_idx.saturating_sub(1);
+            }
+            2 => {
+                self.scroll_log_up(1);
+            }
+            _ => {}
         }
         self.snapshot.selected_app_idx = self.selected_app_idx;
         self.snapshot.checklist_cursor = self.checklist_cursor;
+        self.snapshot.log_scroll = self.log_scroll;
     }
 
     pub fn cursor_down(&mut self) {
-        if self.active_focus == 0 {
-            self.checklist_cursor = (self.checklist_cursor + 1).min(4);
-        } else if !self.snapshot.apps.is_empty() {
-            self.selected_app_idx = (self.selected_app_idx + 1).min(self.snapshot.apps.len() - 1);
+        match self.active_focus {
+            0 => {
+                self.checklist_cursor = (self.checklist_cursor + 1).min(4);
+            }
+            1 => {
+                if !self.snapshot.apps.is_empty() {
+                    self.selected_app_idx = (self.selected_app_idx + 1).min(self.snapshot.apps.len() - 1);
+                }
+            }
+            2 => {
+                self.scroll_log_down(1);
+            }
+            _ => {}
         }
         self.snapshot.selected_app_idx = self.selected_app_idx;
         self.snapshot.checklist_cursor = self.checklist_cursor;
+        self.snapshot.log_scroll = self.log_scroll;
     }
 
     pub fn cycle_tier(&mut self) -> String {
@@ -187,6 +241,19 @@ impl MaintenanceEngine {
         snap.active_focus = self.active_focus;
         snap.target_checks = self.target_checks;
         snap.mascot_visible = self.mascot_visible;
+        snap.log_scroll = self.log_scroll;
+
+        let total_ram_gb = Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+            .map(|b| b as f64 / (1024.0 * 1024.0 * 1024.0))
+            .unwrap_or(16.0);
+        snap.ram_total_gb = total_ram_gb;
 
         // Query RAM metrics
         if let Some(vm_info) = query_ram_metrics() {
@@ -205,7 +272,7 @@ impl MaintenanceEngine {
         let user_diag = PathBuf::from(&home).join("Library/Logs/DiagnosticReports");
         snap.ssd_logs_gb = dir_size_gb(&diag_dir) + dir_size_gb(&user_diag);
 
-        // Estimate local snapshot reclaimable (typically 12-25 GB on APFS macOS)
+        // Estimate local snapshot reclaimable
         snap.ssd_snapshots_gb = estimate_apfs_snapshot_size();
 
         // Scan apps & residues
@@ -220,6 +287,7 @@ impl MaintenanceEngine {
 
     pub fn execute_ram_purge(&mut self) -> String {
         let ts = chrono_time();
+        self.log_scroll = 0;
         self.log_messages.push(format!("{ts} [RAM] Sampling Darwin Mach virtual memory..."));
         let before_vm = query_ram_metrics();
         if let Some(ref b) = before_vm {
@@ -230,28 +298,62 @@ impl MaintenanceEngine {
         }
 
         self.log_messages.push(format!("{ts} [RAM] Invoking /usr/sbin/purge (non-destructive cache discard)..."));
-        let status = Command::new("/usr/sbin/purge").status();
-        let ok = status.map(|s| s.success()).unwrap_or(false);
+        
+        // Attempt sudo -n first (if authorized), then direct invocation. Piped to never leak stderr to raw terminal!
+        let mut ok = false;
+        let sudo_res = Command::new("sudo")
+            .args(["-n", "/usr/sbin/purge"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        if let Ok(out) = sudo_res {
+            if out.status.success() {
+                ok = true;
+            }
+        }
+
+        if !ok {
+            let direct_res = Command::new("/usr/sbin/purge")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output();
+            if let Ok(out) = direct_res {
+                if out.status.success() {
+                    ok = true;
+                }
+            }
+        }
 
         let after_vm = query_ram_metrics();
         let reclaimed = match (before_vm, after_vm) {
-            (Some(b), Some(a)) => (b.reclaimable_gb - a.reclaimable_gb).max(0.6),
-            _ => 1.8,
+            (Some(b), Some(a)) => (b.reclaimable_gb - a.reclaimable_gb).max(0.0),
+            _ => 0.0,
         };
 
         let msg = if ok {
-            format!("[OK] Mach VM flush complete. Reclaimed ≈ {:.2} GB inactive RAM.", reclaimed)
+            let m = if reclaimed > 0.05 {
+                format!("[OK] Mach VM flush complete. Reclaimed ≈ {:.2} GB inactive RAM cache.", reclaimed)
+            } else {
+                "[OK] Inactive RAM cache cleared (disk buffers flushed to zero).".to_string()
+            };
+            self.log_messages.push(format!("{ts} {m}"));
+            self.log_messages.push(format!("{ts} [OK] Memory status is NORMAL. Zen Browser tabs, sessions & CLI tokens 100% intact."));
+            m
         } else {
-            "[OK] Inactive cache compaction signal dispatched to Darwin VM.".to_string()
+            let m = "[!] Permission denied: Inactive RAM cache purge requires root. Press [p] -> Root Authorization or run with sudo.".to_string();
+            self.log_messages.push(format!("{ts} {m}"));
+            m
         };
-        self.log_messages.push(format!("{ts} {msg}"));
-        self.log_messages.push(format!("{ts} [OK] Memory status is NORMAL. Zen Browser tabs, sessions & CLI tokens 100% intact."));
         self.rescan();
         msg
     }
 
     pub fn execute_ssd_clean(&mut self) -> String {
         let ts = chrono_time();
+        self.log_scroll = 0;
         self.log_messages.push(format!("{ts} [SSD] Starting SSD sector optimization (Safety: {})...", self.active_safety_level.label()));
         let mut count = 0;
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".into());
@@ -259,10 +361,26 @@ impl MaintenanceEngine {
         // Target 1: Thin APFS Local Snapshots
         if self.target_checks[1] {
             self.log_messages.push(format!("{ts} [SSD] Thinning APFS local Time Machine snapshots (/)..."));
-            let _ = Command::new("tmutil")
-                .args(["thinlocalsnapshots", "/", "999999999999", "4"])
-                .output();
-            self.log_messages.push(format!("{ts} [OK] APFS local snapshot thinning complete (recovered hidden System Data)."));
+            let tm_res = Command::new("sudo")
+                .args(["-n", "/usr/bin/tmutil", "thinlocalsnapshots", "/", "999999999999", "4"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .or_else(|_| {
+                    Command::new("tmutil")
+                        .args(["thinlocalsnapshots", "/", "999999999999", "4"])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .output()
+                });
+            let ok = tm_res.map(|o| o.status.success()).unwrap_or(false);
+            if ok {
+                self.log_messages.push(format!("{ts} [OK] APFS local snapshot thinning complete (recovered hidden System Data)."));
+            } else {
+                self.log_messages.push(format!("{ts} [!] APFS snapshot thinning skipped (requires root authorization)."));
+            }
             count += 1;
         }
 
@@ -358,14 +476,28 @@ struct VmMetrics {
 }
 
 fn query_ram_metrics() -> Option<VmMetrics> {
-    let out = Command::new("vm_stat").output().ok()?;
+    let out = Command::new("vm_stat")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
+
+    let page_size = if text.contains("page size of 4096 bytes") {
+        4096.0
+    } else {
+        16384.0
+    };
 
     let mut active = 0.0;
     let mut inactive = 0.0;
     let mut wired = 0.0;
     let mut free = 0.0;
     let mut compressed = 0.0;
+    let mut purgeable = 0.0;
+    let mut speculative = 0.0;
+    let mut file_backed = 0.0;
 
     for line in text.lines() {
         let parts: Vec<&str> = line.split(':').collect();
@@ -374,7 +506,7 @@ fn query_ram_metrics() -> Option<VmMetrics> {
         }
         let key = parts[0].trim();
         let val: f64 = parts[1].trim().trim_end_matches('.').parse().unwrap_or(0.0);
-        let bytes = val * 16384.0; // Apple Silicon page size is 16KB
+        let bytes = val * page_size;
         let gb = bytes / (1024.0 * 1024.0 * 1024.0);
 
         if key.contains("Pages active") {
@@ -387,30 +519,58 @@ fn query_ram_metrics() -> Option<VmMetrics> {
             free = gb;
         } else if key.contains("Pages occupied by compressor") {
             compressed = gb;
+        } else if key.contains("Pages purgeable") {
+            purgeable = gb;
+        } else if key.contains("Pages speculative") {
+            speculative = gb;
+        } else if key.contains("File-backed pages") {
+            file_backed = gb;
         }
     }
 
+    // Reclaimable cache: disk buffers, file-backed pages & speculative pages that `purge` flushes
+    let reclaimable = if file_backed > 0.0 || speculative > 0.0 {
+        (file_backed + speculative + purgeable).max(0.0)
+    } else {
+        (inactive * 0.4).max(0.1)
+    };
+
+    let active_apps = active + (inactive - reclaimable).max(0.0) + compressed;
+
     Some(VmMetrics {
-        active_gb: active,
+        active_gb: active_apps,
         wired_gb: wired,
-        reclaimable_gb: inactive + compressed,
+        reclaimable_gb: reclaimable,
         free_gb: free,
     })
 }
 
 fn estimate_apfs_snapshot_size() -> f64 {
-    // Check if tmutil lists local snapshots
-    if let Ok(out) = Command::new("tmutil").arg("listlocalsnapshots").arg("/").output() {
+    let out = Command::new("sudo")
+        .args(["-n", "/usr/bin/tmutil", "listlocalsnapshots", "/"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .or_else(|_| {
+            Command::new("tmutil")
+                .args(["listlocalsnapshots", "/"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+        });
+
+    if let Ok(out) = out {
         let count = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| l.contains("com.apple.TimeMachine"))
             .count();
         if count > 0 {
-            // Snapshots on laptops average 4-8 GB each
             return (count as f64 * 4.8).min(45.0);
         }
     }
-    14.2 // Standard baseline estimate
+    0.0
 }
 
 fn dir_size_gb(path: &Path) -> f64 {
@@ -583,9 +743,14 @@ fn is_common_system_dir(name: &str) -> bool {
     lower.contains("apple")
         || lower.contains("google")
         || lower.contains("icloud")
+        || lower.contains("clouddocs")
+        || lower.contains("knowledge")
+        || lower.contains("caches")
         || lower.contains("crashreporter")
         || lower.contains("addressbook")
         || lower.contains("dock")
+        || lower.contains("com.apple")
+        || lower.contains("system")
         || lower.contains("zen") // Protect Zen Browser explicitly!
 }
 
@@ -626,5 +791,67 @@ mod tests {
         let res = eng.uninstall_selected_app();
         assert!(res.is_err(), "Zen Browser must be shielded from uninstallation!");
         assert!(res.unwrap_err().contains("shielded"));
+    }
+
+    #[test]
+    fn test_console_scrolling_and_panel_focus() {
+        let mut eng = MaintenanceEngine::new();
+        assert_eq!(eng.active_focus, 0);
+
+        eng.focus_next();
+        assert_eq!(eng.active_focus, 1);
+        eng.focus_next();
+        assert_eq!(eng.active_focus, 2);
+        eng.focus_next();
+        assert_eq!(eng.active_focus, 0);
+
+        eng.focus_prev();
+        assert_eq!(eng.active_focus, 2);
+        eng.focus_prev();
+        assert_eq!(eng.active_focus, 1);
+        eng.focus_prev();
+        assert_eq!(eng.active_focus, 0);
+
+        // Populate logs for scroll test
+        eng.log_messages = (0..20).map(|i| format!("Log message {i}")).collect();
+        eng.active_focus = 2; // console focused
+        assert_eq!(eng.log_scroll, 0);
+
+        eng.cursor_up();
+        assert_eq!(eng.log_scroll, 1);
+        eng.scroll_log_up(5);
+        assert_eq!(eng.log_scroll, 6);
+
+        eng.scroll_log_home();
+        assert_eq!(eng.log_scroll, 13); // 20 - 7 = 13
+
+        eng.cursor_down();
+        assert_eq!(eng.log_scroll, 12);
+
+        eng.scroll_log_end();
+        assert_eq!(eng.log_scroll, 0);
+    }
+
+    #[test]
+    fn test_system_dir_protection() {
+        assert!(is_common_system_dir("CloudDocs"));
+        assert!(is_common_system_dir("Knowledge"));
+        assert!(is_common_system_dir("Caches"));
+        assert!(is_common_system_dir("com.apple.metadata"));
+        assert!(is_common_system_dir("Zen"));
+        assert!(!is_common_system_dir("Riot Games"));
+        assert!(!is_common_system_dir("Discord"));
+    }
+
+    #[test]
+    fn test_ram_purge_and_ssd_clean_execution() {
+        let mut eng = MaintenanceEngine::new();
+        let ram_res = eng.execute_ram_purge();
+        assert!(!ram_res.is_empty());
+        assert!(ram_res.contains("[OK]"), "RAM purge should succeed: got {ram_res}");
+
+        let ssd_res = eng.execute_ssd_clean();
+        assert!(!ssd_res.is_empty());
+        assert!(ssd_res.contains("[OK]"), "SSD clean should succeed: got {ssd_res}");
     }
 }

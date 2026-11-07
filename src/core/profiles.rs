@@ -9,7 +9,15 @@ use super::cmd;
 
 fn config_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join(".config/wifi-tui/profiles.json")
+    let aether_p = std::path::Path::new(&home).join(".config/aether/profiles.json");
+    if aether_p.exists() {
+        return aether_p;
+    }
+    let legacy_p = std::path::Path::new(&home).join(".config/wifi-tui/profiles.json");
+    if legacy_p.exists() {
+        return legacy_p;
+    }
+    aether_p
 }
 
 #[derive(Serialize, Deserialize, Clone)]

@@ -55,7 +55,7 @@ impl GatewayRebooter {
         stream.set_read_timeout(Some(timeout)).ok()?;
         stream.set_write_timeout(Some(timeout)).ok()?;
         let req = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: UPnP/1.1 wifi-tui/5.0\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: UPnP/1.1 aether/2.0\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(req.as_bytes()).ok()?;
         let mut buf = String::new();
@@ -202,7 +202,7 @@ fn post_soap(
     let mut stream = TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nSOAPAction: \"{service_type}#{action}\"\r\nContent-Length: {}\r\nConnection: Close\r\nUser-Agent: wifi-tui/5.0 UPnP-Client\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nSOAPAction: \"{service_type}#{action}\"\r\nContent-Length: {}\r\nConnection: Close\r\nUser-Agent: aether/2.0 UPnP-Client\r\n\r\n{body}",
         body.len()
     );
     stream

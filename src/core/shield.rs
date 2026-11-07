@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 
 use crate::core::procmon;
 
-const LOCK_FILE_PATH: &str = "/tmp/wifi-tui.lock";
-const LOG_FILE_PATH: &str = "/tmp/wifi-tui-shield.log";
+const LOCK_FILE_PATH: &str = "/tmp/aether.lock";
+const LEGACY_LOCK_FILE_PATH: &str = "/tmp/wifi-tui.lock";
+const LOG_FILE_PATH: &str = "/tmp/aether-shield.log";
 
 /// Append a timestamped entry to the shield log.
 pub fn log_shield(msg: &str) {
@@ -393,12 +394,12 @@ pub fn rescue_system() -> RescueReport {
             let tty = parts[2];
             let comm = parts[3];
 
-            if comm.contains("wifi-tui") {
+            if comm.contains("aether") || comm.contains("wifi-tui") {
                 // If it's reparented to launchd or has no TTY, it's an orphan!
                 if ppid == 1 || tty == "??" || tty == "?" {
                     InstanceLock::kill_process(pid);
                     report.orphans_killed.push(pid);
-                    log_shield(&format!("Rescue: killed orphaned wifi-tui PID {pid}"));
+                    log_shield(&format!("Rescue: killed orphaned process {comm} (PID {pid})"));
                 }
             }
         }
@@ -439,14 +440,16 @@ pub fn rescue_system() -> RescueReport {
         }
     }
 
-    // 4. Clean lock file if stale
-    let lock_path = Path::new(LOCK_FILE_PATH);
-    if lock_path.exists() {
-        if let Ok(mut f) = File::open(lock_path) {
-            if let Some(pid) = InstanceLock::read_pid(&mut f) {
-                if pid != current_pid && InstanceLock::is_orphan_or_dead(pid) {
-                    let _ = std::fs::remove_file(lock_path);
-                    report.lock_cleaned = true;
+    // 4. Clean lock files if stale
+    for lp_str in &[LOCK_FILE_PATH, LEGACY_LOCK_FILE_PATH] {
+        let lock_path = Path::new(lp_str);
+        if lock_path.exists() {
+            if let Ok(mut f) = File::open(lock_path) {
+                if let Some(pid) = InstanceLock::read_pid(&mut f) {
+                    if pid != current_pid && InstanceLock::is_orphan_or_dead(pid) {
+                        let _ = std::fs::remove_file(lock_path);
+                        report.lock_cleaned = true;
+                    }
                 }
             }
         }

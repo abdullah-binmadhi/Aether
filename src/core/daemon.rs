@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::cmd;
 
-const LABEL: &str = "com.antigravity.wifi-tui";
+const LABEL: &str = "com.antigravity.aether";
 
 fn plist_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -13,13 +13,13 @@ fn plist_path() -> std::path::PathBuf {
 
 fn log_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join(".config/wifi-tui/daemon.log")
+    std::path::Path::new(&home).join(".config/aether/daemon.log")
 }
 
 fn generate_plist() -> String {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "wifi-tui".into());
+        .unwrap_or_else(|_| "aether".into());
     let log = log_path().display().to_string();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

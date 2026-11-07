@@ -8,7 +8,7 @@ use super::model::Telemetry;
 
 fn ticket_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join(".config/wifi-tui/isp_diagnostic_ticket.md")
+    std::path::Path::new(&home).join(".config/aether/isp_diagnostic_ticket.md")
 }
 
 /// Returns (path, status message).

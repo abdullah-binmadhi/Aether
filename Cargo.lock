@@ -3,6 +3,24 @@
 version = 4
 
 [[package]]
+name = "aether"
+version = "2.0.0"
+dependencies = [
+ "clap",
+ "libc",
+ "netdev",
+ "objc2",
+ "objc2-core-wlan",
+ "objc2-foundation",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "signal-hook 0.4.6",
+ "socket2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2135,24 +2153,6 @@ dependencies = [
  "lazy_static",
  "serde",
  "wezterm-dynamic",
-]
-
-[[package]]
-name = "wifi-tui"
-version = "2.0.0"
-dependencies = [
- "clap",
- "libc",
- "netdev",
- "objc2",
- "objc2-core-wlan",
- "objc2-foundation",
- "ratatui",
- "serde",
- "serde_json",
- "signal-hook 0.4.6",
- "socket2",
- "thiserror 2.0.21",
 ]
 
 [[package]]
