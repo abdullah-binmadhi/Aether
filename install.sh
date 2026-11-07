@@ -52,7 +52,7 @@ mkdir -p "$CARGO_BIN"
 
 # 3. Compile and Install Aether + wifi-tui alias
 echo -e "\n${CYAN}›${RESET} Compiling and installing Aether directly from repository..."
-cargo install --git https://github.com/abdullah-binmadhi/WIFI-TUI.git --force
+cargo install --git https://github.com/abdullah-binmadhi/Aether.git --force
 
 # 4. Verify Local PATH and Alias Integration
 LOCAL_BIN="$HOME/.local/bin"

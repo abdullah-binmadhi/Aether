@@ -392,7 +392,7 @@ aether --daemon
 Run the automated installer directly in your terminal. It detects your architecture, verifies the Rust toolchain, compiles `aether`, and configures binary paths and aliases:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/abdullah-binmadhi/WIFI-TUI/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/abdullah-binmadhi/Aether/main/install.sh | bash
 ```
 
 ---
@@ -402,7 +402,7 @@ curl -fsSL https://raw.githubusercontent.com/abdullah-binmadhi/WIFI-TUI/main/ins
 If you have Rust and Cargo installed, install Aether globally with a single command from any directory:
 
 ```bash
-cargo install --git https://github.com/abdullah-binmadhi/WIFI-TUI.git --force
+cargo install --git https://github.com/abdullah-binmadhi/Aether.git --force
 ```
 
 *(This compiles and places `aether` and the `wifi-tui` binary alias into your `$HOME/.cargo/bin/` folder).*
@@ -413,8 +413,8 @@ cargo install --git https://github.com/abdullah-binmadhi/WIFI-TUI.git --force
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/abdullah-binmadhi/WIFI-TUI.git aether
-cd aether
+git clone https://github.com/abdullah-binmadhi/Aether.git
+cd Aether
 
 # 2. Compile optimized release binaries
 cargo build --release
