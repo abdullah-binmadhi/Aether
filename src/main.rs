@@ -962,7 +962,13 @@ fn map_key(
         }
         KeyCode::Char('y') | KeyCode::Char('Y') => QuicFastpath,
         KeyCode::Char('b') | KeyCode::Char('B') => Shape,
-        KeyCode::Char('h') | KeyCode::Char('H') => SafeRenew,
+        KeyCode::Char('h') | KeyCode::Char('H') => {
+            if tab == Tab::GamingRadar {
+                GamingToggleTier3
+            } else {
+                SafeRenew
+            }
+        }
         KeyCode::Char('f') | KeyCode::Char('F') => FixExclamation,
         KeyCode::Char('t') | KeyCode::Char('T') => {
             if tab == Tab::Maintenance {

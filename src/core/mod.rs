@@ -45,6 +45,7 @@ pub mod speedtest;
 pub mod ticket;
 pub mod wan_doctor;
 pub mod watchdog;
+pub mod zero_jitter;
 
 use std::net::Ipv4Addr;
 use std::time::Duration;

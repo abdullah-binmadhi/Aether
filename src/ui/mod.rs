@@ -697,8 +697,8 @@ mod tests {
 
         let rs = app.build_render();
         assert!(rs.palette_active);
-        assert_eq!(rs.palette_total_count, 27);
-        assert_eq!(rs.palette_items.len(), 27);
+        assert_eq!(rs.palette_total_count, 28);
+        assert_eq!(rs.palette_items.len(), 28);
 
         terminal
             .draw(|f| {
@@ -717,7 +717,7 @@ mod tests {
 
         // Verify spotlight search header, live match count, and category tags
         assert!(text.contains("ACTION PALETTE"));
-        assert!(text.contains("27 Actions"));
+        assert!(text.contains("28 Actions"));
         assert!(text.contains("[NET ]") || text.contains("[GAME]") || text.contains("[BOOST"));
 
         // Verify Inspector card elements
@@ -794,7 +794,7 @@ mod tests {
         }
 
         assert!(text.contains("WAN & YOUTUBE DOCTOR"));
-        assert!(text.contains("[ 1 / 27 Actions ]"));
+        assert!(text.contains("[ 1 / 28 Actions ]"));
         assert!(text.contains("DNS latency -15ms"));
 
         // Filter with no matches

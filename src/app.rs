@@ -416,13 +416,38 @@ impl App {
                 self.status_msg = msg;
             }
             (true, None) => {
-                // Game closed: restore safe tweaks (AirDrop, MTU snapshot).
+                // Game closed: restore safe tweaks (AirDrop, MTU snapshot, Tier 1 airspace).
                 let iface = self.collector.interface.clone();
                 let msg = game_mode::exit(&mut self.game_mode, &iface);
                 self.status_msg = msg;
             }
+            (true, Some(_)) => {
+                // While Game Mode is active, verify link signal health so BSSID lock
+                // auto-releases if signal drops below -82 dBm, and verify Gateway IP
+                // so Tier 2 ARP & 50Hz Heartbeat auto-retarget on network switch.
+                let link_id = if self.telemetry.link_active {
+                    self.telemetry.ssid.as_str()
+                } else {
+                    ""
+                };
+                if let Some(failsafe_msg) = self
+                    .game_mode
+                    .jitter_engine
+                    .check_roam_failsafe(link_id, self.telemetry.signal_dbm)
+                {
+                    self.status_msg = failsafe_msg;
+                }
+                if let Some(gw_msg) = self
+                    .game_mode
+                    .jitter_engine
+                    .check_gateway_failsafe(&self.telemetry.gateway)
+                {
+                    self.status_msg = gw_msg;
+                }
+            }
             _ => {}
         }
+        self.gaming_data.jitter_engine_status = self.game_mode.jitter_status();
     }
 
     /// Push the risky kernel/network knobs back to macOS defaults. Called on
@@ -1580,6 +1605,12 @@ impl App {
                     &self.telemetry.gateway,
                     self.lan_data.gateway_rtt_ms,
                 );
+                self.gaming_data.jitter_engine_status = self.game_mode.jitter_status();
+            }
+            GamingToggleTier3 => {
+                let msg = crate::core::game_mode::toggle_tier3_hardcore(&mut self.game_mode);
+                self.gaming_data.jitter_engine_status = self.game_mode.jitter_status();
+                self.status_msg = msg;
             }
             GamingRescan => {
                 self.gaming_radar.trigger_rescan();
@@ -1642,6 +1673,7 @@ impl App {
                     &self.telemetry.gateway,
                     self.lan_data.gateway_rtt_ms,
                 );
+                self.gaming_data.jitter_engine_status = self.game_mode.jitter_status();
             }
             Tab::Maintenance => {
                 if let Some(msg) = self.maintenance.toggle_checklist_item() {
@@ -1711,7 +1743,7 @@ pub struct PaletteEntry {
     pub hotkey: Option<&'static str>,
 }
 
-pub static PALETTE_CATALOG: [PaletteEntry; 27] = [
+pub static PALETTE_CATALOG: [PaletteEntry; 28] = [
     PaletteEntry {
         name: "WAN & YouTube Doctor",
         category: "NETWORK",
@@ -1955,6 +1987,15 @@ pub static PALETTE_CATALOG: [PaletteEntry; 27] = [
         safety: "● Anti-Cheat Safe (APFS-safe)",
         hotkey: None,
     },
+    PaletteEntry {
+        name: "Toggle Tier-3 Hardcore RT",
+        category: "GAMING",
+        desc: "Opt-in RT Scheduler, P-Core Affinity & Thermal Lock",
+        details: "Engages cross-platform Tier 3 Hardcore Esports Mode: Mach Time-Constraint QoS & P-Core affinity (macOS), SCHED_RR & performance governor (Linux), or MMCSS Games High Priority (Windows).",
+        impact: "Eliminates OS scheduler context-switch & E-core jitter",
+        safety: "● Anti-Cheat Safe (OS QoS API)",
+        hotkey: Some("[H] Gaming Tab"),
+    },
 ];
 
 /// Every command exposed in the action palette.
@@ -1994,6 +2035,7 @@ pub fn palette_action(idx: usize) -> Option<Action> {
         24 => CycleTheme,
         25 => OptRamOnly,
         26 => OptSsdOnly,
+        27 => GamingToggleTier3,
         _ => return None,
     })
 }
@@ -2163,6 +2205,7 @@ pub enum Action {
     // Gaming Radar actions.
     GamingCycleFilter,
     GamingToggleShield,
+    GamingToggleTier3,
     GamingRescan,
     // Privacy Fortress actions.
     DnsRace,

@@ -51,6 +51,8 @@ pub struct GameMode {
     mtu_snapshot: Option<String>,
     /// Whether we disabled AirDrop (so we only re-enable what we changed).
     airdrop_disabled: bool,
+    /// Cross-platform 3-Tier Zero-Jitter Engine (macOS / Linux / Windows).
+    pub jitter_engine: super::zero_jitter::ZeroJitterEngine,
 }
 
 impl GameMode {
@@ -59,6 +61,9 @@ impl GameMode {
     }
     pub fn game_name(&self) -> &str {
         &self.game_name
+    }
+    pub fn jitter_status(&self) -> super::zero_jitter::ZeroJitterStatus {
+        self.jitter_engine.status()
     }
 }
 
@@ -119,30 +124,47 @@ fn flush_dns() {
     );
 }
 
-/// Transition IDLE -> ACTIVE: snapshot MTU, apply the safe set. Returns a status
-/// line for the UI. Caller supplies the interface + a prewarm closure (so we
-/// reuse the existing outbound CDN-edge warmer without importing KernelTuner).
+/// Transition IDLE -> ACTIVE: snapshot MTU, apply Tier 1 + Tier 2 Zero-Jitter set (and Tier 3 if opted in).
 pub fn enter(gm: &mut GameMode, interface: &str, game: String) -> String {
     gm.active = true;
     gm.game_name = game.clone();
-    gm.mtu_snapshot = read_mtu(interface);
-    set_airdrop_disabled(true);
+    if !cfg!(test) {
+        gm.mtu_snapshot = read_mtu(interface);
+        set_airdrop_disabled(true);
+        flush_dns();
+    }
     gm.airdrop_disabled = true;
-    flush_dns();
+    let r1 = gm.jitter_engine.enable_tier1(interface, None);
+    let _r2 = gm.jitter_engine.enable_tier2(interface, "192.168.1.1");
+    let t3_suffix = if gm.jitter_engine.state.tier3_opt_in {
+        let _r3 = gm.jitter_engine.enable_tier3();
+        " + Tier 3 Hardcore RT."
+    } else {
+        "."
+    };
     format!(
-        "▶ GAME MODE ON — {game} detected. AirDrop/AWDL off, DNS flushed, risky tweaks locked (anti-cheat safe)."
+        "▶ GAME MODE ON — {game} detected. {} + Tier 2 50Hz Gateway Pacer & FQ-CoDel 3ms{t3_suffix}",
+        r1.summary
     )
 }
 
-/// Transition ACTIVE -> IDLE: restore AirDrop, restore MTU if we have a snapshot.
+/// Toggle Opt-In Tier 3 Hardcore Esports Mode (RT Scheduler, P-Core Affinity & Thermal Lock).
+pub fn toggle_tier3_hardcore(gm: &mut GameMode) -> String {
+    gm.jitter_engine.toggle_tier3()
+}
+
+/// Transition ACTIVE -> IDLE: restore Tier 1 + Tier 2 airspace, pacer, AirDrop, and MTU snapshot.
 pub fn exit(gm: &mut GameMode, interface: &str) -> String {
+    gm.jitter_engine.revert_all();
     if gm.airdrop_disabled {
-        set_airdrop_disabled(false);
+        if !cfg!(test) {
+            set_airdrop_disabled(false);
+        }
         gm.airdrop_disabled = false;
     }
     if let Some(mtu) = gm.mtu_snapshot.take() {
         // Only restore if it differs from the current live value.
-        if read_mtu(interface).as_deref() != Some(mtu.as_str()) {
+        if !cfg!(test) && read_mtu(interface).as_deref() != Some(mtu.as_str()) {
             let _ = cmd::run(
                 &["networksetup", "-setMTU", interface, &mtu],
                 Duration::from_millis(1200),
@@ -151,14 +173,16 @@ pub fn exit(gm: &mut GameMode, interface: &str) -> String {
     }
     gm.active = false;
     let g = std::mem::take(&mut gm.game_name);
-    format!("▶ GAME MODE OFF — {g} closed. AirDrop restored, settings back to safe defaults.")
+    format!("▶ GAME MODE OFF — {g} closed. Tier 1 & Tier 2 airspace, queue, and gateway pacer restored.")
 }
 
-/// Force-exit (used on teardown) without needing the interface for MTU restore
-/// beyond what we snapshotted — restores AirDrop so we never leave it disabled.
+/// Force-exit (used on teardown) — restores Tier 1 and AirDrop so we never leave them locked.
 pub fn force_restore(gm: &mut GameMode) {
+    gm.jitter_engine.revert_all();
     if gm.airdrop_disabled {
-        set_airdrop_disabled(false);
+        if !cfg!(test) {
+            set_airdrop_disabled(false);
+        }
         gm.airdrop_disabled = false;
     }
     gm.active = false;

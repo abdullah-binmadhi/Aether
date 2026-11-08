@@ -163,9 +163,9 @@ fn draw_ping_matrix(f: &mut Frame, gaming: &GamingData, area: Rect) {
 
 fn draw_inspector_column(f: &mut Frame, gaming: &GamingData, area: Rect) {
     let rows = Layout::vertical([
-        Constraint::Length(8), // Active Game Optimizer & Pacing
-        Constraint::Length(7), // 60s Jitter Sparkline
-        Constraint::Min(8),    // Route Hop Analysis
+        Constraint::Length(10), // 3-Tier Zero-Jitter Engine
+        Constraint::Length(6),  // 60s Jitter Sparkline
+        Constraint::Min(8),     // Route Hop Analysis
     ])
     .split(area);
 
@@ -175,38 +175,59 @@ fn draw_inspector_column(f: &mut Frame, gaming: &GamingData, area: Rect) {
 }
 
 fn draw_optimizer_box(f: &mut Frame, gaming: &GamingData, area: Rect) {
-    let block = titled_block("◉ ACTIVE GAME OPTIMIZER & PACING");
+    let block = titled_block("◉ 3-TIER ZERO-JITTER ENGINE");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let profile_badge = if gaming.game_mode_active {
-        Span::styled(" [VIP GAMING ACTIVE] ", invert())
+    let st = &gaming.jitter_engine_status;
+
+    let profile_badge = if gaming.game_mode_active && st.tier3_active {
+        Span::styled(" [T1+T2+T3 HARDCORE] ", invert())
+    } else if gaming.game_mode_active {
+        Span::styled(" [T1+T2 LOCKED] ", invert())
+    } else if st.tier3_active {
+        Span::styled(" [T3 RT ACTIVE] ", invert())
     } else {
-        Span::styled(" [STANDARD DESKTOP] ", dim())
+        Span::styled(" [STANDBY] ", dim())
     };
 
     let lines = vec![
         Line::from(vec![
-            Span::styled(" Profile  : ", dim()),
-            Span::styled(&gaming.active_profile, amber_bold()),
+            Span::styled(" Platform : ", dim()),
+            Span::styled(st.platform.short_label(), amber_bold()),
             Span::raw(" "),
             profile_badge,
         ]),
         Line::from(vec![
-            Span::styled(" AWDL     : ", dim()),
-            Span::styled(&gaming.awdl_status, if gaming.game_mode_active { good() } else { amber() }),
+            Span::styled(" Scan Mute: ", dim()),
+            Span::styled(&st.scan_mute_badge, if gaming.game_mode_active { good() } else { amber() }),
         ]),
         Line::from(vec![
-            Span::styled(" WMM QoS  : ", dim()),
-            Span::styled("0x80 Voice VIP Airtime Priority", amber()),
+            Span::styled(" Roam Lock: ", dim()),
+            Span::styled(&st.bssid_lock_badge, if gaming.game_mode_active { good() } else { amber() }),
         ]),
         Line::from(vec![
-            Span::styled(" TCP Pkts : ", dim()),
-            Span::styled("TCP_NODELAY + Fast-ACK (No Bloat)", amber()),
+            Span::styled(" Radio PS : ", dim()),
+            Span::styled(&st.power_save_badge, if gaming.game_mode_active { good() } else { amber() }),
+        ]),
+        Line::from(vec![
+            Span::styled(" AQM Queue: ", dim()),
+            Span::styled(&st.aqm_queue_badge, if gaming.game_mode_active { good() } else { amber() }),
+        ]),
+        Line::from(vec![
+            Span::styled(" Fast-Path: ", dim()),
+            Span::styled(&st.gw_fastpath_badge, if gaming.game_mode_active { good() } else { amber() }),
+        ]),
+        Line::from(vec![
+            Span::styled(" Tier 3 RT: ", dim()),
+            Span::styled(
+                &st.tier3_scheduler_badge,
+                if st.tier3_active { good() } else { amber() },
+            ),
         ]),
         Line::from(vec![
             Span::styled(" Control  : ", dim()),
-            Span::styled("[Space] Shield  ·  [G] Filter  ·  [R] Ping", amber_bold()),
+            Span::styled("[Space] Shield · [H] Tier 3 RT · [G] Filter · [R] Ping", amber_bold()),
         ]),
     ];
 

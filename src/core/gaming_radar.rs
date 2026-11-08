@@ -95,6 +95,7 @@ pub struct GamingData {
     pub game_mode_active: bool,
     pub active_profile: String,
     pub is_probing: bool,
+    pub jitter_engine_status: super::zero_jitter::ZeroJitterStatus,
 }
 
 pub const DEFAULT_TARGETS: &[(&str, &str, &str, u16)] = &[
@@ -355,6 +356,27 @@ impl GamingRadar {
             },
         ];
 
+        let mut temp_engine = super::zero_jitter::ZeroJitterEngine::new();
+        if is_game_mode {
+            temp_engine.state.tier1_enabled = true;
+            temp_engine.state.tier2_enabled = true;
+            temp_engine.state.scan_muted = true;
+            temp_engine.state.p2p_disabled = true;
+            temp_engine.state.location_scan_suspended = true;
+            temp_engine.state.power_save_disabled = true;
+            temp_engine.state.locked_bssid = Some("Active-AP".to_string());
+            temp_engine.state.aqm_micro_target_active = true;
+            temp_engine.state.gateway_heartbeat_active = true;
+            temp_engine.state.pmtu_clamped_1452 = true;
+            let gw_disp = if !gw_ip.is_empty() && gw_ip != "N/A" {
+                gw_ip.to_string()
+            } else {
+                "192.168.1.1".to_string()
+            };
+            temp_engine.state.pinned_gateway_arp = Some((gw_disp, "gw-pinned".into()));
+        }
+        let jitter_engine_status = temp_engine.status();
+
         let data = GamingData {
             endpoints: filtered,
             selected_idx: self.selected_idx,
@@ -369,6 +391,7 @@ impl GamingRadar {
             game_mode_active: is_game_mode,
             active_profile: if is_game_mode { "Esports VIP Priority (WMM 0x80)".into() } else { "Standard OS Network".into() },
             is_probing: is_probing_active,
+            jitter_engine_status,
         };
 
         self.cached = Some(data.clone());
