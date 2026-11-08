@@ -404,6 +404,24 @@ impl ZeroJitterBackend for DarwinZeroJitter {
             gw_ip
         };
         let gw_mac = if apply_os {
+            // Actively warm the kernel ARP cache with a non-blocking UDP wakeup frame
+            if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
+                let _ = sock.set_nonblocking(true);
+                let _ = sock.send_to(b"AETHER_ARP_WARM", format!("{gw_clean}:9"));
+            }
+            // Opportunistically apply Darwin FQ-CoDel ECN + Delayed-ACK fast-path if passwordless sudo is active
+            let _ = cmd::run(
+                &[
+                    "sudo",
+                    "-n",
+                    "sysctl",
+                    "-w",
+                    "net.classq.fq_codel.enable_ecn=1",
+                    "net.inet.tcp.delayed_ack=0",
+                    "net.inet.tcp.mssdflt=1412",
+                ],
+                Duration::from_millis(600),
+            );
             Self::resolve_gateway_mac(gw_clean).unwrap_or_else(|| "gw-warm".into())
         } else {
             "00:11:22:33:44:55".to_string()

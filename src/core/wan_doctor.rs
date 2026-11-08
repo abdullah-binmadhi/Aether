@@ -174,49 +174,87 @@ impl WanDoctor {
         let mut ggc_ip = String::new();
         let mut misrouted = false;
 
-        let ping = cmd::run(
-            &[
-                "ping",
-                "-c",
-                "2",
-                "-i",
-                "0.15",
-                "-W",
-                "600",
-                "manifest.googlevideo.com",
-            ],
-            Duration::from_millis(1600),
-        );
-        if ping.success {
-            if let Some((avg, stddev)) = parse_ping_stats(&ping.stdout) {
-                yt_rtt = avg;
-                yt_jit = stddev;
+        let (ping, map, yt) = std::thread::scope(|s| {
+            let h_ping = s.spawn(|| {
+                cmd::run(
+                    &[
+                        "ping",
+                        "-c",
+                        "2",
+                        "-i",
+                        "0.15",
+                        "-W",
+                        "600",
+                        "manifest.googlevideo.com",
+                    ],
+                    Duration::from_millis(1600),
+                )
+            });
+            let h_map = s.spawn(|| {
+                cmd::run(
+                    &[
+                        "curl",
+                        "--noproxy",
+                        "*",
+                        "-4",
+                        "--http2",
+                        "-s",
+                        "-m",
+                        "1.8",
+                        "https://redirector.googlevideo.com/report_mapping",
+                    ],
+                    Duration::from_millis(2200),
+                )
+            });
+            let h_yt = s.spawn(|| {
+                cmd::run(
+                    &[
+                        "curl",
+                        "--noproxy",
+                        "*",
+                        "-4",
+                        "--http2",
+                        "-r",
+                        "0-262143",
+                        "-o",
+                        "/dev/null",
+                        "-s",
+                        "-m",
+                        "3.0",
+                        "-w",
+                        "%{speed_download}|%{time_starttransfer}|%{remote_ip}",
+                        "https://www.youtube.com",
+                    ],
+                    Duration::from_millis(3500),
+                )
+            });
+            (
+                h_ping.join().ok(),
+                h_map.join().ok(),
+                h_yt.join().ok(),
+            )
+        });
+
+        if let Some(ping) = ping {
+            if ping.success {
+                if let Some((avg, stddev)) = parse_ping_stats(&ping.stdout) {
+                    yt_rtt = avg;
+                    yt_jit = stddev;
+                }
             }
         }
 
-        let map = cmd::run(
-            &[
-                "curl",
-                "--noproxy",
-                "*",
-                "-4",
-                "--http2",
-                "-s",
-                "-m",
-                "1.8",
-                "https://redirector.googlevideo.com/report_mapping",
-            ],
-            Duration::from_millis(2200),
-        );
-        if let Some(first) = map.stdout.lines().next() {
-            if let Some(idx) = first.find("=>") {
-                let node: String = first[idx + 2..]
-                    .trim()
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-                    .collect();
-                if !node.is_empty() {
-                    ggc_node = node;
+        if let Some(map) = map {
+            if let Some(first) = map.stdout.lines().next() {
+                if let Some(idx) = first.find("=>") {
+                    let node: String = first[idx + 2..]
+                        .trim()
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                        .collect();
+                    if !node.is_empty() {
+                        ggc_node = node;
+                    }
                 }
             }
         }
@@ -225,47 +263,23 @@ impl WanDoctor {
             misrouted = true;
         }
 
-        let yt = cmd::run(
-            &[
-                "curl",
-                "--noproxy",
-                "*",
-                "-4",
-                "--http2",
-                "-r",
-                "0-262143",
-                "-o",
-                "/dev/null",
-                "-s",
-                "-m",
-                "3.0",
-                "-w",
-                "%{speed_download}|%{time_starttransfer}|%{remote_ip}",
-                "https://www.youtube.com",
-            ],
-            Duration::from_millis(3500),
-        );
-        let parts: Vec<&str> = yt.stdout.split('|').collect();
-        if !parts.is_empty() {
-            if let Ok(bps) = parts[0].parse::<f64>() {
-                let mbps = (bps * 8.0 / 1_000_000.0 * 100.0).round() / 100.0;
-                let _ = mbps;
-            }
-        }
         let mut yt_mbps = 0.0;
-        if let Some(bps) = parts.first().and_then(|s| s.parse::<f64>().ok()) {
-            yt_mbps = (bps * 8.0 / 1_000_000.0 * 100.0).round() / 100.0;
-        }
-        if yt_rtt <= 0.0 {
-            if let Some(tstart) = parts.get(1).and_then(|s| s.parse::<f64>().ok()) {
-                if tstart > 0.0 {
-                    yt_rtt = (tstart * 1000.0 * 0.45 * 10.0).round() / 10.0;
+        if let Some(yt) = yt {
+            let parts: Vec<&str> = yt.stdout.split('|').collect();
+            if let Some(bps) = parts.first().and_then(|s| s.parse::<f64>().ok()) {
+                yt_mbps = (bps * 8.0 / 1_000_000.0 * 100.0).round() / 100.0;
+            }
+            if yt_rtt <= 0.0 {
+                if let Some(tstart) = parts.get(1).and_then(|s| s.parse::<f64>().ok()) {
+                    if tstart > 0.0 {
+                        yt_rtt = (tstart * 1000.0 * 0.45 * 10.0).round() / 10.0;
+                    }
                 }
             }
-        }
-        if ggc_ip.is_empty() {
-            if let Some(ip) = parts.get(2) {
-                ggc_ip = ip.trim().to_string();
+            if ggc_ip.is_empty() {
+                if let Some(ip) = parts.get(2) {
+                    ggc_ip = ip.trim().to_string();
+                }
             }
         }
 

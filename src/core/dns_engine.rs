@@ -1,5 +1,6 @@
 //! DNS resolver racer & applier. Ported from dns_engine.py.
 
+use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
 use super::cmd;
@@ -113,19 +114,64 @@ pub fn get_candidates() -> Vec<DnsCandidate> {
     v
 }
 
+/// Build a minimal RFC 1035 DNS A-record query packet for `domain`.
+fn build_dns_query_packet(tx_id: u16, domain: &str) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(64);
+    pkt.extend_from_slice(&tx_id.to_be_bytes());
+    pkt.extend_from_slice(&[0x01, 0x00]); // Flags: Standard query, Recursion Desired (RD=1)
+    pkt.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // AN/NS/AR = 0
+    for label in domain.split('.') {
+        let bytes = label.as_bytes();
+        if !bytes.is_empty() && bytes.len() <= 63 {
+            pkt.push(bytes.len() as u8);
+            pkt.extend_from_slice(bytes);
+        }
+    }
+    pkt.push(0x00); // End of QNAME
+    pkt.extend_from_slice(&[0x00, 0x01]); // QTYPE = A (1)
+    pkt.extend_from_slice(&[0x00, 0x01]); // QCLASS = IN (1)
+    pkt
+}
+
+/// Probe a resolver IP on UDP port 53 directly using a native Rust UDP socket.
+/// Eliminates subprocess fork overhead and `dig` binary dependency.
+fn probe_dns_udp(resolver_ip: &str, domain: &str, tx_id: u16, timeout: Duration) -> Option<f64> {
+    let target = format!("{resolver_ip}:53");
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    let _ = sock.set_read_timeout(Some(timeout));
+    let _ = sock.set_write_timeout(Some(timeout));
+    let pkt = build_dns_query_packet(tx_id, domain);
+    let t0 = Instant::now();
+    sock.send_to(&pkt, &target).ok()?;
+    let mut buf = [0u8; 512];
+    let (n, _) = sock.recv_from(&mut buf).ok()?;
+    if n >= 12 && buf[0] == (tx_id >> 8) as u8 && buf[1] == (tx_id & 0xFF) as u8 {
+        Some(t0.elapsed().as_secs_f64() * 1000.0)
+    } else {
+        None
+    }
+}
+
 fn benchmark(c: &DnsCandidate) -> DnsResult {
-    let server = format!("@{}", c.primary);
-    let mut latencies = Vec::new();
-    for dom in TEST_DOMAINS {
-        let t0 = Instant::now();
-        let out = cmd::run(
-            &["dig", &server, "+time=1", "+tries=1", dom],
-            Duration::from_millis(1400),
-        );
-        if let Some(ms) = parse_query_time(&out.stdout) {
+    let mut latencies = Vec::with_capacity(TEST_DOMAINS.len());
+    for (i, dom) in TEST_DOMAINS.iter().enumerate() {
+        let tx_id = 0xAE00u16.wrapping_add(i as u16);
+        if let Some(ms) = probe_dns_udp(&c.primary, dom, tx_id, Duration::from_millis(450)) {
             latencies.push(ms);
-        } else if out.success {
-            latencies.push(t0.elapsed().as_secs_f64() * 1000.0);
+        } else {
+            // Fallback to `dig` only if direct UDP port 53 is intercepted/filtered
+            let server = format!("@{}", c.primary);
+            let t0 = Instant::now();
+            let out = cmd::run(
+                &["dig", &server, "+time=1", "+tries=1", dom],
+                Duration::from_millis(750),
+            );
+            if let Some(ms) = parse_query_time(&out.stdout) {
+                latencies.push(ms);
+            } else if out.success {
+                latencies.push(t0.elapsed().as_secs_f64() * 1000.0);
+            }
         }
     }
     if latencies.is_empty() {
@@ -183,7 +229,17 @@ impl DnsEngine {
     }
 
     pub fn race_resolvers(&mut self) -> Vec<DnsResult> {
-        let mut results: Vec<DnsResult> = get_candidates().iter().map(benchmark).collect();
+        let candidates = get_candidates();
+        let mut results: Vec<DnsResult> = std::thread::scope(|s| {
+            let handles: Vec<_> = candidates
+                .iter()
+                .map(|c| s.spawn(move || benchmark(c)))
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect()
+        });
         results.sort_by(|a, b| {
             a.avg_ms
                 .partial_cmp(&b.avg_ms)
@@ -278,5 +334,58 @@ impl DnsEngine {
             Duration::from_millis(2000),
         );
         "Flushed mDNSResponder & system DNS cache.".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_dns_query_packet_rfc1035_wire_format() {
+        let pkt = build_dns_query_packet(0xABCD, "cloudflare.com");
+        // 12-byte header + (1+10 + 1+3 + 1) QNAME + 4-byte QTYPE/QCLASS = 32 bytes
+        assert_eq!(pkt.len(), 32);
+        assert_eq!(pkt[0], 0xAB);
+        assert_eq!(pkt[1], 0xCD);
+        assert_eq!(pkt[2], 0x01); // RD = 1
+        assert_eq!(pkt[5], 0x01); // QDCOUNT = 1
+        assert_eq!(pkt[12], 10); // "cloudflare" length
+        assert_eq!(&pkt[13..23], b"cloudflare");
+        assert_eq!(pkt[23], 3); // "com" length
+        assert_eq!(&pkt[24..27], b"com");
+        assert_eq!(pkt[27], 0); // root label
+    }
+
+    #[test]
+    fn test_probe_dns_udp_against_local_mock_server() {
+        let server = UdpSocket::bind("127.0.0.1:0").expect("bind mock DNS");
+        let addr = server.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            if let Ok((n, peer)) = server.recv_from(&mut buf) {
+                if n >= 12 {
+                    let mut resp = buf[..n].to_vec();
+                    resp[2] = 0x81; // QR=1, RD=1
+                    resp[3] = 0x80; // RA=1, RCODE=0
+                    let _ = server.send_to(&resp, peer);
+                }
+            }
+        });
+
+        let pkt = build_dns_query_packet(0x1234, "apple.com");
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let t0 = Instant::now();
+        client.send_to(&pkt, addr).unwrap();
+        let mut rbuf = [0u8; 512];
+        let (n, _) = client.recv_from(&mut rbuf).unwrap();
+        let rtt_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(n >= 12);
+        assert_eq!(rbuf[0], 0x12);
+        assert_eq!(rbuf[1], 0x34);
+        assert!(rtt_ms < 50.0);
     }
 }

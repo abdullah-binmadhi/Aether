@@ -47,13 +47,42 @@ pub mod wan_doctor;
 pub mod watchdog;
 pub mod zero_jitter;
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hops::{diagnose, HopTracker, ScopeSnapshot};
 
 /// Rolling history length for sparklines.
 const HISTORY: usize = 48;
+
+/// Spawns a 25Hz (40ms interval) non-blocking UDP keep-alive pacer to the gateway
+/// so the 802.11 radio remains in Constantly Awake Mode (CAM) without DTIM sleep spikes.
+fn spawn_cam_25hz_pacer(gw_ip: &str) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let target = if gw_ip.is_empty() || gw_ip == "N/A" {
+        "127.0.0.1:9".to_string()
+    } else {
+        format!("{gw_ip}:9")
+    };
+    let stop_clone = Arc::clone(&stop);
+    std::thread::Builder::new()
+        .name("aether-cam-25hz-pacer".into())
+        .spawn(move || {
+            let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else {
+                return;
+            };
+            let _ = sock.set_nonblocking(true);
+            let payload = b"AETHER-CAM-25HZ-KEEPALIVE";
+            while !stop_clone.load(Ordering::Relaxed) {
+                let _ = sock.send_to(payload, &target);
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        })
+        .ok();
+    stop
+}
 
 /// Runs the 4-hop ICMP matrix and tracks throughput history.
 pub struct PingScope {
@@ -70,6 +99,7 @@ pub struct PingScope {
     down_history: Vec<f64>,
     up_history: Vec<f64>,
     pub cam_pacer_active: bool,
+    pub pacer_stop_flag: Option<Arc<AtomicBool>>,
     seq: u16,
     last_rx: u64,
     last_tx: u64,
@@ -77,11 +107,24 @@ pub struct PingScope {
     up_kbs: f64,
 }
 
+impl Drop for PingScope {
+    fn drop(&mut self) {
+        if let Some(flag) = self.pacer_stop_flag.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 impl PingScope {
     pub fn new(interface: &str) -> Self {
         let (gw, isp) = discover_hops(interface);
         let mut hop1 = HopTracker::new(1, "Mac en0", "Local");
         hop1.record(Some(0.1));
+        let pacer_stop_flag = if !cfg!(test) {
+            Some(spawn_cam_25hz_pacer(&gw))
+        } else {
+            None
+        };
         PingScope {
             interface: interface.to_string(),
             hop2: HopTracker::new(2, "Gateway", &gw),
@@ -103,6 +146,7 @@ impl PingScope {
             down_history: vec![0.0; HISTORY],
             up_history: vec![0.0; HISTORY],
             cam_pacer_active: true,
+            pacer_stop_flag,
             seq: 0,
             last_rx: 0,
             last_tx: 0,
@@ -113,8 +157,15 @@ impl PingScope {
 
     pub fn toggle_cam_pacer(&mut self) -> String {
         self.cam_pacer_active = !self.cam_pacer_active;
+        if let Some(flag) = self.pacer_stop_flag.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
         if self.cam_pacer_active {
-            "CAM 25Hz Anti-Sleep Pacer ENABLED.".into()
+            self.pacer_stop_flag = Some(spawn_cam_25hz_pacer(&self.gateway_ip));
+            format!(
+                "CAM 25Hz Anti-Sleep Pacer ENABLED (40ms UDP keep-alive -> {}).",
+                self.gateway_ip
+            )
         } else {
             "CAM 25Hz Anti-Sleep Pacer PAUSED.".into()
         }
@@ -264,4 +315,36 @@ fn discover_hops(interface: &str) -> (String, String) {
         }
     }
     (gw, isp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ping_scope_cam_pacer_starts_and_stops_real_udp_thread() {
+        let mut scope = PingScope::new("en0");
+        assert!(scope.cam_pacer_active);
+
+        // Toggle OFF -> stops any running pacer thread and clears flag
+        let msg_off = scope.toggle_cam_pacer();
+        assert!(!scope.cam_pacer_active);
+        assert!(msg_off.contains("PAUSED"));
+        assert!(scope.pacer_stop_flag.is_none());
+
+        // Toggle ON -> spawns real 25Hz UDP keep-alive thread with stop flag
+        let msg_on = scope.toggle_cam_pacer();
+        assert!(scope.cam_pacer_active);
+        assert!(msg_on.contains("ENABLED"));
+        let flag = scope
+            .pacer_stop_flag
+            .as_ref()
+            .expect("25Hz pacer stop flag must be present")
+            .clone();
+        assert!(!flag.load(Ordering::Relaxed));
+
+        // Toggle OFF again -> signals the background thread to stop
+        scope.toggle_cam_pacer();
+        assert!(flag.load(Ordering::Relaxed));
+    }
 }
