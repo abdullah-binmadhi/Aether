@@ -98,6 +98,59 @@ pub struct GamingData {
     pub jitter_engine_status: super::zero_jitter::ZeroJitterStatus,
 }
 
+impl GamingData {
+    /// Synchronize Tab 9 (`GamingData`) with the real live ICMP route hops from
+    /// `scope.rs` (Hops 1..3) + the currently selected/best game cluster (Hop 4)
+    /// and the unified `ZeroJitterStatus` snapshot.
+    pub fn sync_real_hops_and_jitter(
+        &mut self,
+        scope_hops: &[super::hops::HopStats],
+        jitter_status: super::zero_jitter::ZeroJitterStatus,
+    ) {
+        self.game_mode_active = jitter_status.tier1_active || jitter_status.tier2_active;
+        self.jitter_engine_status = jitter_status;
+
+        if !scope_hops.is_empty() {
+            let mut real_hops = Vec::with_capacity(4);
+            for h in scope_hops.iter().take(3) {
+                real_hops.push(HopAnalysis {
+                    hop_num: h.hop as usize,
+                    label: format!("{} ({})", h.label, h.target),
+                    target: h.target.clone(),
+                    rtt_ms: h.rtt_ms,
+                    verdict: format!("{} (±{:.1}ms)", h.status, h.jitter_ms),
+                });
+            }
+            // Hop 4: currently selected regional game cluster (or best cluster)
+            let (ep_label, ep_rtt, ep_status) = self
+                .endpoints
+                .get(self.selected_idx)
+                .map(|ep| {
+                    (
+                        ep.label.to_string(),
+                        ep.ping_ms.unwrap_or(self.best_ping),
+                        ep.status.to_string(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        self.best_region.clone(),
+                        self.best_ping,
+                        "VIP Competitive Route".into(),
+                    )
+                });
+            real_hops.push(HopAnalysis {
+                hop_num: 4,
+                label: ep_label.clone(),
+                target: ep_label,
+                rtt_ms: ep_rtt,
+                verdict: ep_status,
+            });
+            self.route_hops = real_hops;
+        }
+    }
+}
+
 pub const DEFAULT_TARGETS: &[(&str, &str, &str, u16)] = &[
     // VALORANT & RIOT (League of Legends, Valorant, TFT)
     ("VALORANT & RIOT", "[Riot] Dubai (ME Cluster)", "ec2.me-central-1.amazonaws.com", 443),

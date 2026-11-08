@@ -66,8 +66,7 @@ pub struct RenderState {
     pub root_authorized: bool,
     pub sync_daemons_frozen: bool,
 
-    // Visual deck pre-rendered body lines for the active mode.
-    pub deck_lines: Vec<String>,
+    // Active oscilloscope visual mode (1..=4).
     pub visual_mode: u8,
 
     // UI chrome.

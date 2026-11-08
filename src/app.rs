@@ -468,9 +468,14 @@ impl App {
 
     /// Fill all enrichment telemetry fields from the lightweight engines.
     fn enrich(&mut self) {
+        let jitter_st = self.game_mode.jitter_status();
         let tel = &mut self.telemetry;
-        tel.cam_pacer_active = self.scope.cam_pacer_active;
-        tel.zero_lag_mode = self.antilag.zero_lag_active;
+        tel.cam_pacer_active =
+            self.scope.cam_pacer_active || jitter_st.tier1_active || jitter_st.tier2_active;
+        tel.zero_lag_mode = self.antilag.zero_lag_active || jitter_st.tier1_active;
+        if tel.zero_lag_mode {
+            tel.awdl_active = false;
+        }
         tel.wifi_password = self.profiles.get_wifi_password(&tel.ssid);
 
         let air = self.airtime.sample(tel);
@@ -524,6 +529,8 @@ impl App {
         } else if self.tick % 8 == 2 {
             self.privacy_data = self.privacy_fortress.sample(false);
         }
+        self.gaming_data
+            .sync_real_hops_and_jitter(&self.scope_snap.hops, jitter_st);
 
         // SSID/GW change -> reload.
         let curr_ssid = tel.ssid.clone();
@@ -830,7 +837,6 @@ impl App {
             speed_view = SpeedtestView::from_state(&st);
             speed_snapshot = speedtest::snapshot(&st, &self.telemetry);
         }
-        let deck_lines = crate::ui::widgets::deck_body(self, self.visual_mode, 80, 7);
 
         let hops = self
             .scope_snap
@@ -861,7 +867,7 @@ impl App {
             scope_rtt_history: self.scope_snap.rtt_history.clone(),
             scope_down_history: self.scope_snap.down_kbs_history.clone(),
             scope_up_history: self.scope_snap.up_kbs_history.clone(),
-            cam_pacer_active: self.scope.cam_pacer_active,
+            cam_pacer_active: self.telemetry.cam_pacer_active,
             spectrum: self.spectrum.clone(),
             wan_snap: self.wan_snap.clone(),
             kernel_state: self.kernel_state.clone(),
@@ -886,7 +892,6 @@ impl App {
             auto_pilot_enabled: self.profiles.auto_pilot_enabled(),
             root_authorized: self.antilag.root_authorized,
             sync_daemons_frozen: self.antilag.sync_daemons_frozen,
-            deck_lines,
             visual_mode: self.visual_mode,
             active_tab: self.active_tab,
             proc_cursor: self.proc_cursor,
@@ -934,9 +939,11 @@ impl App {
         use Action::*;
         match action {
             // Kernel sysctl writes, link/MTU changes, process freezing, root.
+            // Note: ZeroLag and CamPacer are 100% anti-cheat safe (user-space & link defaults)
+            // and directly synchronize with the 3-Tier ZeroJitterEngine.
             Boost | Doctor | Hop2Repair | ZombieSync | QuicFastpath | Ipv6Guard
             | FixExclamation | SafeRenew | MtuClamp | RootAuth | ToggleWmm | ToggleNoDelay
-            | PaletteToggleBuffers | Prewarm | ZeroLag | CamPacer | AutoPilot | Shape
+            | PaletteToggleBuffers | Prewarm | AutoPilot | Shape
             | CaptiveGateway | RoamRescan => true,
             // Confirm freezes a process (SIGSTOP) only on the Processes tab; and
             // runs the risky tune rows on the Tuning tab.
@@ -1027,7 +1034,15 @@ impl App {
                     self.status_msg = self.scope.toggle_cam_pacer();
                 }
             }
-            CamPacer => self.status_msg = self.scope.toggle_cam_pacer(),
+            CamPacer => {
+                let msg = self.scope.toggle_cam_pacer();
+                self.game_mode.jitter_engine.state.power_save_disabled =
+                    self.scope.cam_pacer_active;
+                self.telemetry.cam_pacer_active = self.scope.cam_pacer_active
+                    || self.game_mode.jitter_engine.state.tier1_enabled;
+                self.gaming_data.jitter_engine_status = self.game_mode.jitter_status();
+                self.status_msg = msg;
+            }
             VisualNext => {
                 self.visual_mode = (self.visual_mode % 4) + 1;
                 self.status_msg = format!(
@@ -1177,9 +1192,23 @@ impl App {
             ZeroLag => {
                 let mut tel = self.telemetry.clone();
                 let m = self.antilag.toggle_awdl(Some(&mut tel));
+                let iface = self.collector.interface.clone();
+                if self.antilag.zero_lag_active {
+                    let _ = crate::core::game_mode::enter(
+                        &mut self.game_mode,
+                        &iface,
+                        "Zero-Lag Shield".into(),
+                    );
+                } else if self.game_mode.active() {
+                    let _ = crate::core::game_mode::exit(&mut self.game_mode, &iface);
+                }
+                tel.zero_lag_mode = self.antilag.zero_lag_active;
+                tel.awdl_active = !self.antilag.zero_lag_active;
                 self.telemetry = tel;
                 self.profiles
                     .set_zero_lag_mode(self.antilag.zero_lag_active);
+                self.gaming_data
+                    .sync_real_hops_and_jitter(&self.scope_snap.hops, self.game_mode.jitter_status());
                 self.status_msg = m;
             }
             ZombieSync => {
@@ -1235,7 +1264,10 @@ impl App {
                         self.status_msg = self.shaper.toggle_throttle_pid(p.pid, &p.name, 8);
                     }
                 } else {
-                    self.status_msg = "5GHz sibling lock requires networksetup association.".into();
+                    self.active_tab = Tab::Processes;
+                    self.status_msg =
+                        "Switched to Tab [3] Processes — select a process and press [B] to shape bandwidth."
+                            .into();
                 }
             }
             SafeRenew => {
@@ -1284,11 +1316,14 @@ impl App {
                 } else {
                     1500
                 };
-                self.status_msg = format!("Clamping MTU to {new_mtu}…");
+                self.status_msg = format!("Running Smart PMTU Discovery & clamping MTU to {new_mtu}…");
                 self.spawn_bg(move || {
+                    let pmtu_doc = crate::core::pmtu::PmtuDoctor::new(&iface);
+                    let (_, pmtu_msg) = pmtu_doc.auto_heal(None);
                     let kernel = KernelTuner::new("Wi-Fi", &iface);
+                    let k_msg = kernel.set_optimal_mtu(new_mtu);
                     ActionOutcome {
-                        status: kernel.set_optimal_mtu(new_mtu),
+                        status: format!("{k_msg} │ {pmtu_msg}"),
                         ..Default::default()
                     }
                 });
@@ -1595,9 +1630,19 @@ impl App {
                 let iface = self.lan_scanner.interface.clone();
                 if active {
                     let msg = crate::core::game_mode::exit(&mut self.game_mode, &iface);
+                    self.antilag.zero_lag_active = false;
+                    self.telemetry.zero_lag_mode = false;
+                    self.telemetry.awdl_active = true;
                     self.status_msg = format!("Game Shield Deactivated: {msg}");
                 } else {
-                    let msg = crate::core::game_mode::enter(&mut self.game_mode, &iface, "Manual Priority Shield".to_string());
+                    let msg = crate::core::game_mode::enter(
+                        &mut self.game_mode,
+                        &iface,
+                        "Manual Priority Shield".to_string(),
+                    );
+                    self.antilag.zero_lag_active = true;
+                    self.telemetry.zero_lag_mode = true;
+                    self.telemetry.awdl_active = false;
                     self.status_msg = format!("Game Shield Activated: {msg}");
                 }
                 self.gaming_data = self.gaming_radar.probe_quick_sample(
@@ -1605,11 +1650,13 @@ impl App {
                     &self.telemetry.gateway,
                     self.lan_data.gateway_rtt_ms,
                 );
-                self.gaming_data.jitter_engine_status = self.game_mode.jitter_status();
+                self.gaming_data
+                    .sync_real_hops_and_jitter(&self.scope_snap.hops, self.game_mode.jitter_status());
             }
             GamingToggleTier3 => {
                 let msg = crate::core::game_mode::toggle_tier3_hardcore(&mut self.game_mode);
-                self.gaming_data.jitter_engine_status = self.game_mode.jitter_status();
+                self.gaming_data
+                    .sync_real_hops_and_jitter(&self.scope_snap.hops, self.game_mode.jitter_status());
                 self.status_msg = msg;
             }
             GamingRescan => {
@@ -1619,6 +1666,8 @@ impl App {
                     &self.telemetry.gateway,
                     self.lan_data.gateway_rtt_ms,
                 );
+                self.gaming_data
+                    .sync_real_hops_and_jitter(&self.scope_snap.hops, self.game_mode.jitter_status());
                 self.status_msg = "Probing global game servers in background...".into();
             }
             DnsRace => {
@@ -1627,12 +1676,22 @@ impl App {
                 self.status_msg = "Racing DNS resolvers via UDP port 53 in background...".into();
             }
             DnsApplySelected => {
+                if let Some(r) = self
+                    .privacy_fortress
+                    .dns_candidates
+                    .get(self.privacy_fortress.selected_dns_idx)
+                {
+                    self.telemetry.dns_servers =
+                        vec![r.primary.to_string(), r.secondary.to_string()];
+                    self.wan_snap.ecs_dns_optimal = true;
+                }
                 let msg = self.privacy_fortress.apply_selected_dns("Wi-Fi");
                 self.status_msg = msg;
                 self.privacy_data = self.privacy_fortress.sample(false);
             }
             DnsResetDhcp => {
                 let msg = self.privacy_fortress.reset_to_dhcp("Wi-Fi");
+                self.telemetry.dns_servers.clear();
                 self.status_msg = msg;
                 self.privacy_data = self.privacy_fortress.sample(false);
             }
@@ -1653,28 +1712,8 @@ impl App {
                 }
             }
             Tab::Tuning => self.run_selected_tune_row(),
-            Tab::PrivacyFortress => {
-                let msg = self.privacy_fortress.apply_selected_dns("Wi-Fi");
-                self.status_msg = msg;
-                self.privacy_data = self.privacy_fortress.sample(false);
-            }
-            Tab::GamingRadar => {
-                let active = self.game_mode.active();
-                let iface = self.lan_scanner.interface.clone();
-                if active {
-                    let msg = crate::core::game_mode::exit(&mut self.game_mode, &iface);
-                    self.status_msg = format!("Game Shield Deactivated: {msg}");
-                } else {
-                    let msg = crate::core::game_mode::enter(&mut self.game_mode, &iface, "Manual Priority Shield".to_string());
-                    self.status_msg = format!("Game Shield Activated: {msg}");
-                }
-                self.gaming_data = self.gaming_radar.probe_quick_sample(
-                    self.game_mode.active(),
-                    &self.telemetry.gateway,
-                    self.lan_data.gateway_rtt_ms,
-                );
-                self.gaming_data.jitter_engine_status = self.game_mode.jitter_status();
-            }
+            Tab::PrivacyFortress => self.apply_action(Action::DnsApplySelected),
+            Tab::GamingRadar => self.apply_action(Action::GamingToggleShield),
             Tab::Maintenance => {
                 if let Some(msg) = self.maintenance.toggle_checklist_item() {
                     self.status_msg = msg;
@@ -2384,5 +2423,29 @@ mod perf_tests {
         app.apply_action(Action::GamingCycleFilter);
         let nav_time = t3.elapsed();
         assert!(nav_time < std::time::Duration::from_millis(5), "Gaming radar navigation took {:?}", nav_time);
+    }
+
+    #[test]
+    fn unified_state_sync_across_tabs() {
+        let mut app = App::new("en0", Arc::new(AtomicBool::new(false)));
+
+        // 1. Toggling GamingToggleShield on Tab 9 syncs Tab 4 Zero-Lag state
+        app.apply_action(Action::GamingToggleShield);
+        assert!(app.game_mode.active());
+        assert!(app.telemetry.zero_lag_mode);
+        assert!(!app.telemetry.awdl_active);
+        assert!(app.gaming_data.jitter_engine_status.tier1_active);
+        assert!(app.gaming_data.jitter_engine_status.tier2_active);
+
+        // 2. Toggling ZeroLag (from Tab 4 or Action Palette) while in Game Mode is allowed and cleanly exits
+        app.apply_action(Action::ZeroLag);
+        assert!(!app.game_mode.active());
+        assert!(!app.telemetry.zero_lag_mode);
+        assert!(!app.gaming_data.jitter_engine_status.tier1_active);
+
+        // 3. Pressing Shape outside Tab::Processes switches directly to Tab::Processes
+        app.apply_action(Action::SwitchTab(Tab::Dashboard));
+        app.apply_action(Action::Shape);
+        assert_eq!(app.active_tab, Tab::Processes);
     }
 }

@@ -41,7 +41,7 @@ pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
     .split(cols[1]);
 
     draw_host_inspector(f, lan, right_tiles[0]);
-    draw_subnet_security(f, lan, right_tiles[1]);
+    draw_subnet_security(f, rs, lan, right_tiles[1]);
 }
 
 fn draw_kpis(f: &mut Frame, lan: &LanData, area: Rect) {
@@ -245,18 +245,31 @@ fn draw_host_inspector(f: &mut Frame, lan: &LanData, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_subnet_security(f: &mut Frame, lan: &LanData, area: Rect) {
-    let block = titled_block("◪ SUBNET INTEGRITY & SECURITY WATCHER");
+fn draw_subnet_security(f: &mut Frame, rs: &RenderState, lan: &LanData, area: Rect) {
+    let block = titled_block("◪ SUBNET INTEGRITY & ARP / EVIL-TWIN GUARD");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let mut lines = Vec::new();
 
-    let sec_style = if lan.ip_conflict { alert() } else { good() };
+    let arp_alert = rs.arp_info.status.contains('⚠') || rs.arp_info.status.contains("[!]");
+    let sec_style = if lan.ip_conflict || arp_alert {
+        alert()
+    } else {
+        good()
+    };
 
     lines.push(Line::from(vec![
         Span::styled(" Subnet Status : ", dim()),
         Span::styled(&lan.security_posture, sec_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" ARP / BSSID   : ", dim()),
+        Span::styled(
+            rs.arp_info.status.replace('✔', "[OK]").replace('⚠', "[!]"),
+            if arp_alert { alert() } else { good() },
+        ),
+        Span::styled(format!(" · {}", rs.telemetry.security), dim()),
     ]));
     lines.push(Line::from(vec![
         Span::styled(" Gateway IP/MAC: ", dim()),

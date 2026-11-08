@@ -31,10 +31,7 @@ pub fn render(f: &mut Frame, rs: &RenderState, area: Rect) {
     .split(cols[0]);
     render_table(f, rs, left[0]);
     render_top_talkers(f, rs, left[1]);
-    let bot =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(left[2]);
-    render_detail(f, rs, bot[0]);
-    render_lan(f, rs, bot[1]);
+    render_detail(f, rs, left[2]);
 
     // Right column: tall LIVE CONNECTIONS socket panel.
     render_connections(f, rs, cols[1]);
@@ -211,10 +208,10 @@ fn render_top_talkers(f: &mut Frame, rs: &RenderState, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 fn render_detail(f: &mut Frame, rs: &RenderState, area: Rect) {
-    let block = titled_block("SELECTED PROCESS");
+    let block = titled_block("SELECTED PROCESS INSPECTOR ([Space] Freeze/Unfreeze · [B] Shape · [U] Resume All)");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let bw = (inner.width as usize).saturating_sub(18).clamp(8, 28);
+    let bw = (inner.width as usize).saturating_sub(24).clamp(12, 48);
 
     let Some(p) = rs.processes.get(rs.proc_cursor) else {
         f.render_widget(
@@ -233,13 +230,15 @@ fn render_detail(f: &mut Frame, rs: &RenderState, area: Rect) {
         ("LIVE", good())
     };
     let lines = vec![
-        Line::from(Span::styled(
-            format!("{}  (pid {})", p.name, p.pid),
-            amber_bold(),
-        )),
+        Line::from(vec![
+            Span::styled(format!("{}  (PID {})", p.name, p.pid), amber_bold()),
+            Span::styled("   ·   State: ", amber()),
+            Span::styled(state.0, state.1),
+            Span::styled(format!("   ·   Session Total: {:.1} MB", p.total_mb), amber()),
+        ]),
         Line::from(Span::styled(
             format!(
-                "DOWN {} {:.1} KB/s",
+                "▼ DOWN {} {:>7.1} KB/s",
                 bar(p.down_kbs, 0.0, 2000.0, bw).trim_matches(|c| c == '[' || c == ']'),
                 p.down_kbs
             ),
@@ -247,53 +246,17 @@ fn render_detail(f: &mut Frame, rs: &RenderState, area: Rect) {
         )),
         Line::from(Span::styled(
             format!(
-                "UP   {} {:.1} KB/s",
+                "▲ UP   {} {:>7.1} KB/s",
                 bar(p.up_kbs, 0.0, 1000.0, bw).trim_matches(|c| c == '[' || c == ']'),
                 p.up_kbs
             ),
             amber(),
         )),
         Line::from(Span::styled(
-            format!("Session: {:.1} MB total", p.total_mb),
+            "Tip: Use Tab [8] LAN RADAR for full subnet host discovery & port scanning.",
             amber(),
         )),
-        Line::from(Span::styled(format!("State  : {}", state.0), state.1)),
     ];
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// LAN device map tile.
-fn render_lan(f: &mut Frame, rs: &RenderState, area: Rect) {
-    let lan = &rs.lan_data;
-    let block = titled_block("LAN DEVICE MAP");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let mut lines = vec![Line::from(Span::styled(
-        format!("{} device(s) · {}", lan.count, lan.summary),
-        if lan.ip_conflict {
-            alert()
-        } else {
-            amber_bold()
-        },
-    ))];
-    let cap = (inner.height as usize).saturating_sub(1);
-    for d in lan.devices.iter().take(cap) {
-        let line = format!("{:<15} {} {}", d.ip, d.vendor, d.role);
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  {}",
-                truncate(&line, (inner.width as usize).saturating_sub(2))
-            ),
-            amber(),
-        )));
-    }
-    if lan.devices.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  Press [N] to run a LAN sweep.",
-            amber(),
-        )));
-    }
     f.render_widget(Paragraph::new(lines), inner);
 }
 
