@@ -120,9 +120,16 @@ pub fn read_rf() -> Option<RfRead> {
 
         // Passive neighbour list from the driver's cached scan results. This does
         // not trigger a new active scan (no radio disruption).
+        let active_bssid = iface.bssid().map(|s| s.to_string());
+        let active_ssid = out.ssid.clone();
+        let mut skipped_self_beacon = false;
+
         if let Some(set) = iface.cachedScanResults() {
             let active_ch = out.channel_num;
             for (idx, net) in set.to_vec().iter().enumerate() {
+                let net_bssid = net.bssid().map(|s| s.to_string());
+                let net_ssid = net.ssid().map(|s| s.to_string());
+                let net_rssi = net.rssiValue() as i64;
                 let (channel_num, band, width_mhz) = match net.wlanChannel() {
                     Some(c) => (
                         c.channelNumber() as i64,
@@ -131,8 +138,25 @@ pub fn read_rf() -> Option<RfRead> {
                     ),
                     None => (0, Band::Unknown, 20),
                 };
+
+                if is_self_beacon(
+                    active_bssid.as_deref(),
+                    active_ssid.as_deref(),
+                    out.channel_num,
+                    out.channel_band,
+                    out.rssi_dbm,
+                    net_bssid.as_deref(),
+                    net_ssid.as_deref(),
+                    channel_num,
+                    band,
+                    net_rssi,
+                    &mut skipped_self_beacon,
+                ) {
+                    continue;
+                }
+
                 // macOS masks neighbour SSIDs too; synthesise a stable RF label.
-                let label = match net.ssid().map(|s| s.to_string()) {
+                let label = match net_ssid {
                     Some(s) if !s.is_empty() => s,
                     _ => format!("Neighbor-{}-Ch{} #{}", band.label(), channel_num, idx + 1),
                 };
@@ -141,7 +165,7 @@ pub fn read_rf() -> Option<RfRead> {
                     channel_num,
                     width_mhz,
                     band,
-                    signal_dbm: net.rssiValue() as i64,
+                    signal_dbm: net_rssi,
                     noise_dbm: net.noiseMeasurement() as i64,
                     phy_mode: "scan".into(),
                     same_channel: channel_num == active_ch && active_ch > 0,
@@ -150,5 +174,78 @@ pub fn read_rf() -> Option<RfRead> {
         }
 
         Some(out)
+    }
+}
+
+/// Filter out the connected AP's own beacon from `cachedScanResults()` so macOS
+/// SSID/BSSID masking never creates a false "ghost collision" against ourselves.
+#[allow(clippy::too_many_arguments)]
+fn is_self_beacon(
+    active_bssid: Option<&str>,
+    active_ssid: Option<&str>,
+    active_ch: i64,
+    active_band: Band,
+    active_rssi: i64,
+    net_bssid: Option<&str>,
+    net_ssid: Option<&str>,
+    net_ch: i64,
+    net_band: Band,
+    net_rssi: i64,
+    skipped_self_beacon: &mut bool,
+) -> bool {
+    if let (Some(ab), Some(nb)) = (active_bssid, net_bssid) {
+        if !ab.is_empty() && ab.eq_ignore_ascii_case(nb) {
+            return true;
+        }
+    }
+    if !*skipped_self_beacon
+        && active_ch > 0
+        && net_ch == active_ch
+        && net_band == active_band
+        && (net_rssi - active_rssi).abs() <= 4
+        && (net_ssid.is_none() || net_ssid == active_ssid)
+    {
+        *skipped_self_beacon = true;
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_masked_self_beacon_but_keeps_second_neighbor() {
+        let mut skipped = false;
+        // First masked beacon on same Ch 132 within 1 dBm of active (-62 vs -61) -> self-beacon
+        assert!(is_self_beacon(
+            None,
+            None,
+            132,
+            Band::Band5GHz,
+            -62,
+            None,
+            None,
+            132,
+            Band::Band5GHz,
+            -61,
+            &mut skipped,
+        ));
+        assert!(skipped);
+        // Second distinct neighbor on Ch 132 -> kept as real collision
+        assert!(!is_self_beacon(
+            None,
+            None,
+            132,
+            Band::Band5GHz,
+            -62,
+            None,
+            None,
+            132,
+            Band::Band5GHz,
+            -61,
+            &mut skipped,
+        ));
     }
 }

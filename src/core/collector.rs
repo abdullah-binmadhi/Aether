@@ -86,6 +86,16 @@ impl Collector {
         let (sib5, sib24) = resolve_siblings(&tel.ssid, &self.saved_networks);
         tel.sibling_5g_ssid = sib5;
         tel.sibling_24g_ssid = sib24;
+        // When macOS masks the live SSID and index 0 of saved networks happens to be the
+        // 2.4GHz sibling while CoreWLAN confirms we are on 5GHz/6GHz, promote the 5GHz name.
+        if !tel.ssid_available && tel.band.is_fast() {
+            let low = tel.ssid.to_lowercase();
+            if low.contains("2.4") || low.contains("2g") {
+                if let Some(ref s5) = tel.sibling_5g_ssid {
+                    tel.ssid = s5.clone();
+                }
+            }
+        }
 
         // --- Interface / link via netdev (no subprocess) ---
         if let Ok(iface) = netdev::get_default_interface() {

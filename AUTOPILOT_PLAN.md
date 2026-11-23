@@ -499,11 +499,21 @@ Upgraded WIFI-TUI + AutoPilotEngine:
 ## 4. Implementation Roadmap & Verification
 
 1. **Create `src/core/autopilot.rs`**: Implement `AutoPilotState`, `Capabilities`, `AutoPilotEngine`, hysteresis dwell guard, and unit tests for state transitions & anti-cheat safety lockouts.
-2. **Complete `src/core/bandwidth_shaper.rs`**: Add `enable_autopilot_aqm` and `disable_autopilot_aqm` with `dnctl` CoDel + `pfctl -a com.apple/aether`.
+2. **Complete `src/core/bandwidth_shaper.rs`**: Add `enable_autopilot_aqm` and `disable_autopilot_aqm` with `dnctl` CoDel + `pfctl -a com.apple/aether` (including `co_channel_bypass` `AC_VO` preemption).
 3. **Enhance `src/core/antilag.rs` & `src/core/zero_jitter.rs`**: Add `enforce_awdl_down` (`awdl0`/`llw0`) with clean rollback on exit/teardown.
-4. **Enhance `src/core/kernel_tuner.rs`**: Add `adapt_tcp_profile_to_congestion` (32MB / 4MB / 1MB + MSS 1452/1412/1360).
-5. **Enhance `src/core/roaming.rs` & `src/core/gateway.rs`**: Add `execute_smart_roam` (with 90s cooldown, blocked during active games) and `lease_priority_game_flow` (UPnP `AddPortMapping`).
-6. **Wire into `src/core/mod.rs`, `src/app.rs`, and `src/core/daemon.rs`**: Register `pub mod autopilot;`, hook non-blocking `spawn_bg` transitions in `App::refresh`, and ensure `App::teardown` restores `pfctl`, `dnctl`, `awdl0`, and default sysctls.
+4. **Enhance `src/core/kernel_tuner.rs`**: Add `adapt_tcp_profile_to_congestion` (`32MB / 4MB / 1MB` & `1452 / 1412 / 1360`) and `adapt_tcp_for_cochannel_collision` (`1200B` Micro-MSS).
+5. **Enhance `src/core/roaming.rs`, `src/core/corewlan.rs`, `src/core/collector.rs` & `src/core/gateway.rs`**:
+   - Filter out self-beacon "ghost collisions" in `corewlan.rs` and promote 5GHz/6GHz sibling names in `collector.rs`.
+   - Add non-DFS UNII-1/UNII-3 preference + collision penalty in `roaming.rs` (`execute_smart_roam` using only saved SSID + Wi-Fi password, no router admin access required).
+   - Add `lease_priority_game_flow` (UPnP `AddPortMapping`) in `gateway.rs`.
+6. **Wire into `src/core/mod.rs`, `src/app.rs`, `src/core/daemon.rs`, `src/ui/mod.rs` & `src/ui/views/spectrum.rs`**: Register `pub mod autopilot;`, hook non-blocking `spawn_bg` transitions in `App::refresh`, add `[A]` keybinding + header/Overview/Spectrum live indicators, and ensure `App::teardown` restores `pfctl`, `dnctl`, `awdl0`, and default sysctls.
+
+### Zero-Router-Access (Client-Only) Collision Bypass Strategy
+When the user only has the Wi-Fi name and password (no router admin portal access), `AutoPilotEngine` automates 4 client-side mechanisms:
+1. **Self-Beacon Filtering (`corewlan.rs`)**: Prevents macOS masked scan results from counting the connected AP's own beacon as a co-channel collision.
+2. **DFS-Escape & Clean-Channel Smart Roam (`roaming.rs`)**: Automatically prefers non-DFS UNII-1/UNII-3 sibling APs using `networksetup -setairportnetwork` with the stored Wi-Fi password.
+3. **1200B Micro-MSS & Tight 1MB TX Ring (`kernel_tuner.rs`)**: Reduces air-frame duration so packets slip between colliding neighbor bursts with lower RF collision probability.
+4. **802.11e `AC_VO` (`CWmin=3`) Preemption + `awdl0`/`llw0` Down-Lock (`bandwidth_shaper.rs`, `antilag.rs`)**: Marks interactive traffic `DSCP EF` (`0xb8`) via `pfctl` so the Mac wins the 802.11e airtime contention window without touching router settings.
 
 ### Verification Commands (Post-Implementation)
 ```bash

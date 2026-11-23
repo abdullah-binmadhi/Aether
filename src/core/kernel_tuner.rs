@@ -51,6 +51,7 @@ pub enum TcpCongestionTier {
     HighBdp32Mb,
     Balanced4Mb,
     TightAntiBloat1Mb,
+    CoChannelBypass1Mb,
 }
 
 pub struct KernelTuner {
@@ -139,6 +140,18 @@ impl KernelTuner {
                     "net.inet.tcp.mssdflt=1452".into(),
                     "net.inet.tcp.win_scale_factor=8".into(),
                 ],
+                TcpCongestionTier::CoChannelBypass1Mb => vec![
+                    "net.inet.tcp.autorcvbufmax=2097152".into(),
+                    "net.inet.tcp.autosndbufmax=1048576".into(),
+                    "net.inet.tcp.recvspace=262144".into(),
+                    "net.inet.tcp.sendspace=131072".into(),
+                    "net.inet.tcp.mssdflt=1200".into(),
+                    "net.inet.tcp.v6mssdflt=1180".into(),
+                    "net.inet.tcp.delayed_ack=0".into(),
+                    "net.inet.tcp.rexmt_slop=20".into(),
+                    "net.inet.tcp.l4s=1".into(),
+                    "net.classq.fq_codel.enable_ecn=1".into(),
+                ],
             };
             if !write_sysctls(&pairs) {
                 return None;
@@ -148,6 +161,37 @@ impl KernelTuner {
         Some(format!(
             "● Adaptive TCP Profile -> {target:?} (Airtime {airtime_load_pct}%, Retry {tx_retry_pct:.1}%)"
         ))
+    }
+
+    /// Client-only co-channel collision bypass: shrinks frames to MSS 1200B so they
+    /// slip between colliding neighbor bursts with lower RF collision probability.
+    pub fn adapt_tcp_for_cochannel_collision(
+        &mut self,
+        anti_cheat_active: bool,
+        apply_os: bool,
+    ) -> Option<String> {
+        if anti_cheat_active {
+            return None;
+        }
+        self.active_congestion_tier = TcpCongestionTier::CoChannelBypass1Mb;
+        if apply_os {
+            let pairs = vec![
+                "net.inet.tcp.autorcvbufmax=2097152".into(),
+                "net.inet.tcp.autosndbufmax=1048576".into(),
+                "net.inet.tcp.recvspace=262144".into(),
+                "net.inet.tcp.sendspace=131072".into(),
+                "net.inet.tcp.mssdflt=1200".into(),
+                "net.inet.tcp.v6mssdflt=1180".into(),
+                "net.inet.tcp.delayed_ack=0".into(),
+                "net.inet.tcp.rexmt_slop=20".into(),
+                "net.inet.tcp.l4s=1".into(),
+                "net.classq.fq_codel.enable_ecn=1".into(),
+            ];
+            if !write_sysctls(&pairs) {
+                return None;
+            }
+        }
+        Some("● Co-Channel Bypass: 1200B Micro-MSS + 1MB TX Ring + Fast-ACK".into())
     }
 
     pub fn get_state(&self) -> HashMap<String, String> {
@@ -498,6 +542,14 @@ mod tests {
         assert_eq!(
             tuner.active_congestion_tier,
             TcpCongestionTier::TightAntiBloat1Mb
+        );
+        let bypass = tuner
+            .adapt_tcp_for_cochannel_collision(false, false)
+            .unwrap();
+        assert!(bypass.contains("1200B Micro-MSS"));
+        assert_eq!(
+            tuner.active_congestion_tier,
+            TcpCongestionTier::CoChannelBypass1Mb
         );
     }
 }

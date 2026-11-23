@@ -178,14 +178,34 @@ fn render_heatmap(f: &mut Frame, rs: &RenderState, area: Rect) {
         )));
     }
 
-    // Spacer + recommendation banner, word-wrapped, as the bottom anchor.
+    // Spacer + client-side AutoPilot / collision bypass banner, word-wrapped.
     lines.push(Line::from(Span::raw("")));
-    let banner = format!(
-        "◆ RECOMMENDED: Channel {} — {}  │  {} co-channel collision(s)",
-        report.recommended_5g_channel,
-        report.recommendation_reason,
-        report.collisions.len()
-    );
+    let banner = if report.collisions.is_empty() {
+        if rs.auto_pilot_enabled {
+            format!(
+                "◆ AIRSPACE CLEAR: 0 co-channel collisions (Self-beacon filtered │ AutoPilot: {})",
+                rs.autopilot_short
+            )
+        } else {
+            format!(
+                "◆ RECOMMENDED: Channel {} — {}  │  0 co-channel collisions",
+                report.recommended_5g_channel, report.recommendation_reason
+            )
+        }
+    } else if rs.auto_pilot_enabled {
+        format!(
+            "◆ CLIENT BYPASS ACTIVE (No Router Needed): AutoPilot enforcing WMM AC_VO (CWmin=3) + 1200B Micro-MSS + AWDL Down on Ch {} ({} clash)",
+            rs.telemetry.channel_num,
+            report.collisions.len()
+        )
+    } else {
+        format!(
+            "◆ RECOMMENDED: Channel {} — {}  │  {} co-channel collision(s) (Press [A] for AutoPilot Bypass)",
+            report.recommended_5g_channel,
+            report.recommendation_reason,
+            report.collisions.len()
+        )
+    };
     for l in wrap_text(&banner, w) {
         lines.push(Line::from(Span::styled(l, good())));
     }

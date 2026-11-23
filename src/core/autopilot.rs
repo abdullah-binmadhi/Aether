@@ -133,6 +133,13 @@ impl AutoPilotEngine {
         if game_running {
             return AutoPilotState::CompetitiveGamingLocked;
         }
+        let spec = super::spectrum::analyze(tel);
+        if !spec.collisions.is_empty() {
+            if tel.sticky_client && tel.sibling_5g_ssid.is_some() {
+                return AutoPilotState::PreGamePreparation;
+            }
+            return AutoPilotState::MultiUserCongestionMitigation;
+        }
         if tel.airtime_load_pct >= 65
             || tel.tx_retry_pct >= 6.0
             || scope.max_bloat_delta_ms > 18.0
@@ -183,12 +190,14 @@ impl AutoPilotEngine {
         let mut shaper = BandwidthShaper::new();
 
         let anti_cheat = self.caps.anti_cheat_detected;
+        let has_collision = !super::spectrum::analyze(tel).collisions.is_empty();
         let est_cap_mbps = ((tel.tx_rate_mbps.max(20) as f64) * 0.45).round() as u32;
         let aqm_cfg = AqmConfig {
             interface: interface.to_string(),
             up_cap_mbps: est_cap_mbps.clamp(10, 250),
             down_cap_mbps: (est_cap_mbps * 2).clamp(20, 500),
             game_udp_ports: vec![],
+            co_channel_bypass: has_collision,
         };
 
         match next {
@@ -207,13 +216,18 @@ impl AutoPilotEngine {
             AutoPilotState::CompetitiveGamingLocked => {
                 actions.push(antilag.enforce_awdl_down(true, apply_os));
                 if !anti_cheat {
-                    if let Some(tcp_msg) = kernel.adapt_tcp_profile_to_congestion(
-                        tel.airtime_load_pct,
-                        tel.tx_retry_pct,
-                        true,
-                        false,
-                        apply_os,
-                    ) {
+                    let tcp_opt = if has_collision {
+                        kernel.adapt_tcp_for_cochannel_collision(false, apply_os)
+                    } else {
+                        kernel.adapt_tcp_profile_to_congestion(
+                            tel.airtime_load_pct,
+                            tel.tx_retry_pct,
+                            true,
+                            false,
+                            apply_os,
+                        )
+                    };
+                    if let Some(tcp_msg) = tcp_opt {
                         actions.push(tcp_msg);
                     }
                     if self.caps.has_sudo {
@@ -237,14 +251,22 @@ impl AutoPilotEngine {
                 }
             }
             AutoPilotState::MultiUserCongestionMitigation => {
+                if has_collision {
+                    actions.push(antilag.enforce_awdl_down(true, apply_os));
+                }
                 if !anti_cheat {
-                    if let Some(tcp_msg) = kernel.adapt_tcp_profile_to_congestion(
-                        tel.airtime_load_pct,
-                        tel.tx_retry_pct,
-                        false,
-                        false,
-                        apply_os,
-                    ) {
+                    let tcp_opt = if has_collision {
+                        kernel.adapt_tcp_for_cochannel_collision(false, apply_os)
+                    } else {
+                        kernel.adapt_tcp_profile_to_congestion(
+                            tel.airtime_load_pct,
+                            tel.tx_retry_pct,
+                            false,
+                            false,
+                            apply_os,
+                        )
+                    };
+                    if let Some(tcp_msg) = tcp_opt {
                         actions.push(tcp_msg);
                     }
                     if self.caps.has_pfctl_dnctl {
@@ -425,5 +447,41 @@ mod tests {
         );
         assert!(msg.contains("Anti-Cheat Safe Guard"));
         assert!(!msg.contains("WMM AC_VO VIP"));
+    }
+
+    #[test]
+    fn cochannel_collision_triggers_client_bypass_without_router_access() {
+        let mut engine = AutoPilotEngine::new("192.168.1.1");
+        engine.caps.has_sudo = true;
+        engine.caps.has_pfctl_dnctl = true;
+
+        let mut tel = base_tel();
+        tel.channel_num = 132;
+        tel.neighbors.push(crate::core::model::Neighbor {
+            label: "Neighbor-5GHz-Ch132".into(),
+            channel_num: 132,
+            width_mhz: 80,
+            band: Band::Band5GHz,
+            signal_dbm: -61,
+            noise_dbm: -95,
+            phy_mode: "ac".into(),
+            same_channel: true,
+        });
+        let scope = base_scope();
+
+        // Low airtime (20%) still escalates to MultiUserCongestionMitigation on collision
+        assert_eq!(
+            engine.evaluate_next_state(&tel, &scope, false),
+            AutoPilotState::MultiUserCongestionMitigation
+        );
+        let msg = engine.execute_transition(
+            AutoPilotState::MultiUserCongestionMitigation,
+            "en0",
+            &tel,
+            &scope,
+            false,
+        );
+        assert!(msg.contains("1200B Micro-MSS"));
+        assert!(msg.contains("DSCP EF"));
     }
 }

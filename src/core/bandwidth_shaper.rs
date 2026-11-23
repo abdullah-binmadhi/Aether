@@ -10,6 +10,7 @@ pub struct AqmConfig {
     pub up_cap_mbps: u32,
     pub down_cap_mbps: u32,
     pub game_udp_ports: Vec<u16>,
+    pub co_channel_bypass: bool,
 }
 
 pub struct BandwidthShaper {
@@ -45,11 +46,22 @@ impl BandwidthShaper {
             }
         }
         let ports_joined = port_list.join(", ");
-        format!(
-            "match out on {} proto udp from any to any port {{ {} }} set tos ef\n\
-             dummynet out on {} proto tcp from any to any port {{ 80, 443 }} queue 2\n",
-            cfg.interface, ports_joined, cfg.interface
-        )
+        let mut rules = format!(
+            "match out on {} proto udp from any to any port {{ {} }} set tos ef\n",
+            cfg.interface, ports_joined
+        );
+        if cfg.co_channel_bypass {
+            // Preempt co-channel neighbors using WMM AC_VO (CWmin=3) on interactive flows
+            rules.push_str(&format!(
+                "match out on {} proto tcp from any to any flags A/A set tos ef\n",
+                cfg.interface
+            ));
+        }
+        rules.push_str(&format!(
+            "dummynet out on {} proto tcp from any to any port {{ 80, 443 }} queue 2\n",
+            cfg.interface
+        ));
+        rules
     }
 
     /// Atomically configures `dnctl` CoDel pipes and loads an isolated `pfctl`
@@ -187,11 +199,13 @@ mod tests {
             up_cap_mbps: 25,
             down_cap_mbps: 180,
             game_udp_ports: vec![9001],
+            co_channel_bypass: true,
         };
         let rules = BandwidthShaper::build_pfctl_anchor_rules(&cfg);
         assert!(rules.contains("match out on en0 proto udp"));
         assert!(rules.contains("9001"));
         assert!(rules.contains("set tos ef"));
+        assert!(rules.contains("flags A/A set tos ef"));
         assert!(rules.contains("dummynet out on en0 proto tcp"));
 
         let msg = shaper.enable_autopilot_aqm(&cfg, false).unwrap();

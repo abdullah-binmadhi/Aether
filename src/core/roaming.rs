@@ -2,7 +2,17 @@
 
 use super::model::{Band, Telemetry};
 
-fn score_ap_candidate(signal_dbm: i64, band: Band, width_mhz: i64) -> i64 {
+fn is_non_dfs_5g(channel_num: i64) -> bool {
+    (36..=48).contains(&channel_num) || (149..=165).contains(&channel_num)
+}
+
+fn score_ap_candidate_channel(
+    signal_dbm: i64,
+    band: Band,
+    width_mhz: i64,
+    channel_num: i64,
+    has_collision: bool,
+) -> i64 {
     let base = (signal_dbm + 100).clamp(0, 65);
     let band_bonus = match band {
         Band::Band6GHz => 24,
@@ -16,7 +26,13 @@ fn score_ap_candidate(signal_dbm: i64, band: Band, width_mhz: i64) -> i64 {
     } else {
         0
     };
-    base + band_bonus + width_bonus
+    let non_dfs_bonus = if band == Band::Band5GHz && is_non_dfs_5g(channel_num) {
+        10
+    } else {
+        0
+    };
+    let collision_penalty = if has_collision { 16 } else { 0 };
+    (base + band_bonus + width_bonus + non_dfs_bonus - collision_penalty).max(0)
 }
 
 #[derive(Clone)]
@@ -65,7 +81,18 @@ pub fn evaluate_roaming(tel: &Telemetry) -> RoamEval {
         };
     }
 
-    let active_score = score_ap_candidate(curr_sig, curr_band, curr_width);
+    let active_has_collision = curr_ch > 0
+        && tel
+            .neighbors
+            .iter()
+            .any(|n| n.channel_num == curr_ch && n.signal_dbm >= -75);
+    let active_score = score_ap_candidate_channel(
+        curr_sig,
+        curr_band,
+        curr_width,
+        curr_ch,
+        active_has_collision,
+    );
     let sib_5g = tel.sibling_5g_ssid.clone();
     let mut candidates: Vec<Candidate> = Vec::new();
 
@@ -78,7 +105,19 @@ pub fn evaluate_roaming(tel: &Telemetry) -> RoamEval {
                 .map(|s| !s.is_empty() && n_ssid.to_lowercase().contains(&s.to_lowercase()))
                 .unwrap_or(false);
         if is_own && n_sig >= -76 {
-            let c_score = score_ap_candidate(n_sig, net.band, net.width_mhz);
+            let net_colliding = net.channel_num > 0
+                && tel.neighbors.iter().any(|other| {
+                    other.channel_num == net.channel_num
+                        && other.label != net.label
+                        && other.signal_dbm >= -75
+                });
+            let c_score = score_ap_candidate_channel(
+                n_sig,
+                net.band,
+                net.width_mhz,
+                net.channel_num,
+                net_colliding,
+            );
             let ssid = if sib_5g.is_some() && net.band.is_fast() {
                 sib_5g.clone().unwrap()
             } else {
@@ -100,7 +139,8 @@ pub fn evaluate_roaming(tel: &Telemetry) -> RoamEval {
         if let Some(sib) = &sib_5g {
             if !candidates.iter().any(|c| c.band.is_fast()) {
                 let est_sig = (curr_sig - 5).max(-72);
-                let c_score = score_ap_candidate(est_sig, Band::Band5GHz, 80);
+                let c_score =
+                    score_ap_candidate_channel(est_sig, Band::Band5GHz, 80, 36, false);
                 candidates.push(Candidate {
                     ssid: sib.clone(),
                     band: Band::Band5GHz,
@@ -252,5 +292,12 @@ mod tests {
         // Immediate second attempt is blocked by 90s cooldown
         assert!(execute_smart_roam("en0", &eval, "", false, &mut cd, false).is_none());
         assert_eq!(cd.attempts, 1);
+    }
+
+    #[test]
+    fn non_dfs_clean_5g_scores_higher_than_colliding_dfs() {
+        let dfs_clash = score_ap_candidate_channel(-62, Band::Band5GHz, 80, 132, true);
+        let clean_unii1 = score_ap_candidate_channel(-64, Band::Band5GHz, 80, 36, false);
+        assert!(clean_unii1 - dfs_clash >= 12);
     }
 }
