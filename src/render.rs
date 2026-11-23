@@ -65,7 +65,11 @@ pub struct RenderState {
     pub auto_pilot_enabled: bool,
     pub autopilot_state: String,
     pub autopilot_short: String,
+    pub autopilot_plain_mode: String,
     pub autopilot_summary: String,
+    pub autopilot_features: Vec<crate::core::autopilot::FeatureTelemetryRow>,
+    pub autopilot_log: Vec<crate::core::autopilot::ActivityLogEntry>,
+    pub autopilot_blocked_spikes: u64,
     pub root_authorized: bool,
     pub sync_daemons_frozen: bool,
 

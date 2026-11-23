@@ -258,6 +258,8 @@ pub struct ActionOutcome {
     pub cam_pacer: Option<bool>,
     pub autopilot_summary: Option<String>,
     pub autopilot_actions: Option<Vec<String>>,
+    pub autopilot_new_logs: Option<Vec<crate::core::autopilot::ActivityLogEntry>>,
+    pub autopilot_spikes_delta: u64,
 }
 
 impl App {
@@ -433,11 +435,15 @@ impl App {
                 let mut engine = crate::core::autopilot::AutoPilotEngine::new(&tel.gateway);
                 engine.caps = caps;
                 engine.roam_cooldown = cooldown;
+                engine.activity_log.clear();
                 let msg = engine.execute_transition(next, &iface, &tel, &scope, true);
+                let new_logs: Vec<_> = engine.activity_log.into_iter().collect();
                 ActionOutcome {
                     status: msg.clone(),
                     autopilot_summary: Some(msg),
                     autopilot_actions: Some(engine.last_actions),
+                    autopilot_new_logs: Some(new_logs),
+                    autopilot_spikes_delta: engine.blocked_spikes_count,
                     ..Default::default()
                 }
             });
@@ -732,6 +738,12 @@ impl App {
             if let Some(acts) = o.autopilot_actions {
                 self.autopilot.last_actions = acts;
             }
+            if let Some(logs) = o.autopilot_new_logs {
+                for entry in logs.into_iter().rev() {
+                    self.autopilot.push_log(entry.plain_message);
+                }
+            }
+            self.autopilot.blocked_spikes_count += o.autopilot_spikes_delta;
         }
         true
     }
@@ -954,7 +966,17 @@ impl App {
             auto_pilot_enabled: self.profiles.auto_pilot_enabled(),
             autopilot_state: self.autopilot.state.label().to_string(),
             autopilot_short: self.autopilot.state.short_label().to_string(),
+            autopilot_plain_mode: self.autopilot.state.plain_mode_label().to_string(),
             autopilot_summary: self.autopilot.last_summary.clone(),
+            autopilot_features: self.autopilot.build_feature_telemetry(
+                &self.telemetry,
+                self.game_mode.active(),
+                self.kernel.wmm_vip_requested,
+                self.shaper.aqm_active,
+                self.telemetry.cam_pacer_active,
+            ),
+            autopilot_log: self.autopilot.activity_log.iter().cloned().collect(),
+            autopilot_blocked_spikes: self.autopilot.blocked_spikes_count,
             root_authorized: self.antilag.root_authorized,
             sync_daemons_frozen: self.antilag.sync_daemons_frozen,
             visual_mode: self.visual_mode,
@@ -1419,6 +1441,7 @@ impl App {
                 self.autopilot.enabled = state;
                 if state {
                     self.preset.selected_preset_id = 1;
+                    self.autopilot.push_log("✓ Auto-Pilot enabled — 24/7 protection active");
                     self.autopilot_tick();
                     self.status_msg = format!(
                         "⚙ Auto-Pilot ENABLED [{}] — Closed-loop optimization active ([A] to toggle).",
@@ -1426,6 +1449,7 @@ impl App {
                     );
                 } else {
                     self.autopilot.teardown(&self.collector.interface, !cfg!(test));
+                    self.autopilot.push_log("○ Auto-Pilot paused (switched to manual mode)");
                     self.autopilot.last_summary = "○ Auto-Pilot PAUSED (Manual mode)".into();
                     self.status_msg =
                         "○ Auto-Pilot DISABLED (Manual mode — press [A] to re-enable).".into();
