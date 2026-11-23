@@ -517,9 +517,16 @@ fn draw_header(f: &mut Frame, rs: &RenderState, area: Rect) {
         format!("{} (inferred)", tel.ssid)
     };
     let (_icon, page, _n) = rs.active_tab.nav();
+    let auto_badge = if rs.auto_pilot_enabled {
+        Span::styled(format!(" ⚙ AUTO:{} ", rs.autopilot_short), good())
+    } else {
+        Span::styled(" ○ AUTO:OFF ", dim())
+    };
     let left = Line::from(vec![
         Span::styled(format!(" {page} "), invert()),
-        Span::raw("  "),
+        Span::raw(" "),
+        auto_badge,
+        Span::raw(" "),
         Span::styled(
             format!(
                 "● {ssid}  ·  {}  ·  {} Mbps",
@@ -543,9 +550,15 @@ fn draw_header(f: &mut Frame, rs: &RenderState, area: Rect) {
     let chunks = Layout::horizontal([Constraint::Min(20), Constraint::Length(26)]).split(inner);
     // When Game Mode is active, show a controller badge in the left region.
     if rs.game_mode_active {
+        let auto_badge_gm = if rs.auto_pilot_enabled {
+            Span::styled(format!(" ⚙ AUTO:{} ", rs.autopilot_short), good())
+        } else {
+            Span::styled(" ○ AUTO:OFF ", dim())
+        };
         let left = Line::from(vec![
             Span::styled(format!(" {page} "), invert()),
-            Span::raw("  "),
+            Span::raw(" "),
+            auto_badge_gm,
             Span::styled(" ▌GAME MODE▐ ", good()),
             Span::styled(
                 format!(" {}  ·  {} Mbps", tel.band.label(), tel.tx_rate_mbps),
@@ -561,7 +574,7 @@ fn draw_header(f: &mut Frame, rs: &RenderState, area: Rect) {
 
 fn draw_context_footer(f: &mut Frame, rs: &RenderState, area: Rect, spin: usize) {
     let keys = match rs.active_tab {
-        Tab::Dashboard => " [Enter] action palette   [R] rescan   [L] zero-lag   [1-0] pages ",
+        Tab::Dashboard => " [A] auto-pilot   [Enter] palette   [R] rescan   [L] zero-lag   [1-0] pages ",
         Tab::Spectrum => " [R] rescan airspace   [S] sweet-spot locator   [1-0] pages ",
         Tab::Processes => " [↑↓] select   [Space] pause/resume   [B] throttle   [N] LAN sweep ",
         Tab::Tuning => " [↑↓] select   [Space] toggle / run   [P] cycle preset   [A] auto-pilot ",

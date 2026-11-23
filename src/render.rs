@@ -63,6 +63,9 @@ pub struct RenderState {
     pub preset_before_after: String,
     pub preset_detected_issues: Vec<String>,
     pub auto_pilot_enabled: bool,
+    pub autopilot_state: String,
+    pub autopilot_short: String,
+    pub autopilot_summary: String,
     pub root_authorized: bool,
     pub sync_daemons_frozen: bool,
 

@@ -256,6 +256,8 @@ pub struct ActionOutcome {
     pub sync_frozen: Option<bool>,
     pub root_authorized: Option<bool>,
     pub cam_pacer: Option<bool>,
+    pub autopilot_summary: Option<String>,
+    pub autopilot_actions: Option<Vec<String>>,
 }
 
 impl App {
@@ -433,7 +435,9 @@ impl App {
                 engine.roam_cooldown = cooldown;
                 let msg = engine.execute_transition(next, &iface, &tel, &scope, true);
                 ActionOutcome {
-                    status: msg,
+                    status: msg.clone(),
+                    autopilot_summary: Some(msg),
+                    autopilot_actions: Some(engine.last_actions),
                     ..Default::default()
                 }
             });
@@ -722,6 +726,12 @@ impl App {
             if let Some(v) = o.cam_pacer {
                 self.scope.cam_pacer_active = v;
             }
+            if let Some(s) = o.autopilot_summary {
+                self.autopilot.last_summary = s;
+            }
+            if let Some(acts) = o.autopilot_actions {
+                self.autopilot.last_actions = acts;
+            }
         }
         true
     }
@@ -748,6 +758,11 @@ impl App {
         });
         // (id, friendly label, one-line description)
         let toggles = [
+            (
+                "auto_pilot",
+                "Auto-Pilot Closed-Loop",
+                "Automatically detect congestion/gaming & apply optimal fixes [A]",
+            ),
             (
                 "zero_lag",
                 "Zero-Lag Mode",
@@ -795,11 +810,16 @@ impl App {
             ),
         ];
         for (id, label, detail) in toggles {
+            let st = if id == "auto_pilot" {
+                Some(self.profiles.auto_pilot_enabled())
+            } else {
+                state_of(id)
+            };
             rows.push(TuneRow {
                 kind: TuneKind::Toggle,
                 label: label.into(),
                 detail: detail.into(),
-                state: state_of(id),
+                state: st,
             });
         }
         rows.push(TuneRow {
@@ -932,6 +952,9 @@ impl App {
             preset_before_after: self.preset.before_after_summary.clone(),
             preset_detected_issues: self.preset.detected_issues.clone(),
             auto_pilot_enabled: self.profiles.auto_pilot_enabled(),
+            autopilot_state: self.autopilot.state.label().to_string(),
+            autopilot_short: self.autopilot.state.short_label().to_string(),
+            autopilot_summary: self.autopilot.last_summary.clone(),
             root_authorized: self.antilag.root_authorized,
             sync_daemons_frozen: self.antilag.sync_daemons_frozen,
             visual_mode: self.visual_mode,
@@ -985,7 +1008,7 @@ impl App {
             // and directly synchronize with the 3-Tier ZeroJitterEngine.
             Boost | Doctor | Hop2Repair | ZombieSync | QuicFastpath | Ipv6Guard
             | FixExclamation | SafeRenew | MtuClamp | RootAuth | ToggleWmm | ToggleNoDelay
-            | PaletteToggleBuffers | Prewarm | AutoPilot | Shape
+            | PaletteToggleBuffers | Prewarm | Shape
             | CaptiveGateway | RoamRescan => true,
             // Confirm freezes a process (SIGSTOP) only on the Processes tab; and
             // runs the risky tune rows on the Tuning tab.
@@ -1393,13 +1416,20 @@ impl App {
             }
             AutoPilot => {
                 let state = self.profiles.toggle_auto_pilot();
+                self.autopilot.enabled = state;
                 if state {
                     self.preset.selected_preset_id = 1;
+                    self.autopilot_tick();
+                    self.status_msg = format!(
+                        "⚙ Auto-Pilot ENABLED [{}] — Closed-loop optimization active ([A] to toggle).",
+                        self.autopilot.state.label()
+                    );
+                } else {
+                    self.autopilot.teardown(&self.collector.interface, !cfg!(test));
+                    self.autopilot.last_summary = "○ Auto-Pilot PAUSED (Manual mode)".into();
+                    self.status_msg =
+                        "○ Auto-Pilot DISABLED (Manual mode — press [A] to re-enable).".into();
                 }
-                self.status_msg = format!(
-                    "Closed-Loop Smart Preset Auto-Adapt {}.",
-                    if state { "ENABLED" } else { "MANUAL" }
-                );
             }
             CaptiveGateway => {
                 let gw_ip = self.telemetry.gateway.clone();
@@ -1789,6 +1819,7 @@ impl App {
         // routed through apply_action -> spawn_bg.
         let label = row.label.clone();
         match label.as_str() {
+            "Auto-Pilot Closed-Loop" => self.apply_action(Action::AutoPilot),
             "Zero-Lag Mode" => self.apply_action(Action::ZeroLag),
             "WMM VIP Airtime Priority" => self.apply_action(Action::ToggleWmm),
             "25Hz CAM Anti-Sleep Pacer" => self.apply_action(Action::CamPacer),

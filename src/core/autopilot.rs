@@ -38,6 +38,17 @@ impl AutoPilotState {
             Self::EmergencyLinkRescue => "EMERGENCY LINK RESCUE",
         }
     }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::IdleOptimal => "IDLE",
+            Self::HighThroughputStream => "4K-BDP",
+            Self::MultiUserCongestionMitigation => "CONGESTION",
+            Self::PreGamePreparation => "PRE-GAME",
+            Self::CompetitiveGamingLocked => "GAMING",
+            Self::EmergencyLinkRescue => "RESCUE",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +96,12 @@ pub struct AutoPilotEngine {
 impl AutoPilotEngine {
     pub fn new(gateway_ip: &str) -> Self {
         let caps = Capabilities::discover(gateway_ip);
+        let init_summary = format!(
+            "⚙ AutoPilot Ready (Sudo:{} │ AQM:{} │ UPnP:{})",
+            if caps.has_sudo { "ON" } else { "OFF" },
+            if caps.has_pfctl_dnctl { "ON" } else { "OFF" },
+            if caps.has_upnp_igd { "ON" } else { "OFF" },
+        );
         AutoPilotEngine {
             enabled: true,
             state: AutoPilotState::IdleOptimal,
@@ -93,7 +110,7 @@ impl AutoPilotEngine {
             last_transition: Instant::now() - Duration::from_secs(30),
             dwell_period: Duration::from_secs(15),
             roam_cooldown: RoamCooldown::default(),
-            last_summary: "Auto-Pilot Standby".into(),
+            last_summary: init_summary,
             last_actions: Vec::new(),
         }
     }

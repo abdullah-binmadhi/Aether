@@ -365,7 +365,11 @@ fn render_advice(f: &mut Frame, rs: &RenderState, area: Rect) {
         )));
     }
 
-    // Recommended action, word-wrapped so nothing truncates.
+    // Auto-Pilot live status line + recommended action, word-wrapped.
+    let ap_style = if rs.auto_pilot_enabled { good() } else { crate::ui::theme::dim() };
+    for l in wrap_text(&rs.autopilot_summary, w) {
+        lines.push(Line::from(Span::styled(l, ap_style)));
+    }
     for l in wrap_text(&analysis.recommended_action, w) {
         lines.push(Line::from(Span::styled(l, good())));
     }
