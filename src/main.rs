@@ -667,6 +667,9 @@ fn worker_loop(
     rx: Receiver<Action>,
 ) {
     let mut app = App::new(interface, Arc::clone(&stop));
+    if let Ok(mut guard) = shared.lock() {
+        *guard = Some(app.build_render());
+    }
     app.refresh();
     publish(&shared, &app);
 

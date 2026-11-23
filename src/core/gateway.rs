@@ -50,8 +50,9 @@ impl GatewayRebooter {
     }
 
     fn http_get(host: &str, port: u16, path: &str, timeout: Duration) -> Option<String> {
-        let addr = format!("{host}:{port}");
-        let mut stream = TcpStream::connect(&addr).ok()?;
+        use std::net::ToSocketAddrs;
+        let addr = format!("{host}:{port}").to_socket_addrs().ok()?.next()?;
+        let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
         stream.set_read_timeout(Some(timeout)).ok()?;
         stream.set_write_timeout(Some(timeout)).ok()?;
         let req = format!(

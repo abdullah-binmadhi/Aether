@@ -92,12 +92,12 @@ impl Capabilities {
         }
         let has_sudo = cmd::ok(
             &["sudo", "-n", "sysctl", "net.inet.tcp.delayed_ack"],
-            Duration::from_millis(600),
+            Duration::from_millis(350),
         );
         let has_pfctl_dnctl = has_sudo
-            && cmd::ok(&["sudo", "-n", "pfctl", "-s", "info"], Duration::from_millis(600));
+            && cmd::ok(&["sudo", "-n", "pfctl", "-s", "info"], Duration::from_millis(350));
         let mut gw = GatewayRebooter::new(gateway_ip);
-        let has_upnp_igd = gw.discover_control_url(Duration::from_millis(700)).is_some();
+        let has_upnp_igd = gw.discover_control_url(Duration::from_millis(200)).is_some();
         let anti_cheat_detected = game_mode::detect_anti_cheat();
         Capabilities {
             has_sudo,
