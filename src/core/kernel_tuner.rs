@@ -45,6 +45,14 @@ fn write_sysctls(pairs: &[String]) -> bool {
     ok
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+pub enum TcpCongestionTier {
+    HighBdp32Mb,
+    Balanced4Mb,
+    TightAntiBloat1Mb,
+}
+
 pub struct KernelTuner {
     pub service_name: String,
     pub interface: String,
@@ -53,6 +61,7 @@ pub struct KernelTuner {
     pub high_buffers_requested: bool,
     pub last_edge_ttft_ms: f64,
     pub edges_warmed: bool,
+    pub active_congestion_tier: TcpCongestionTier,
 }
 
 impl KernelTuner {
@@ -65,7 +74,80 @@ impl KernelTuner {
             high_buffers_requested: true,
             last_edge_ttft_ms: 18.0,
             edges_warmed: false,
+            active_congestion_tier: TcpCongestionTier::HighBdp32Mb,
         }
+    }
+
+    pub fn classify_congestion_tier(
+        airtime_load_pct: i64,
+        tx_retry_pct: f64,
+        is_gaming: bool,
+    ) -> TcpCongestionTier {
+        if is_gaming || airtime_load_pct >= 68 || tx_retry_pct >= 8.0 {
+            TcpCongestionTier::TightAntiBloat1Mb
+        } else if airtime_load_pct >= 45 || tx_retry_pct >= 3.5 {
+            TcpCongestionTier::Balanced4Mb
+        } else {
+            TcpCongestionTier::HighBdp32Mb
+        }
+    }
+
+    /// Dynamically scales TCP buffers and default MSS to prevent TX ring bufferbloat
+    /// during multi-user congestion or gaming, while preserving 32MB BDP on clean links.
+    /// Returns `None` if `anti_cheat_active` is true (strict zero-kernel-touch boundary).
+    pub fn adapt_tcp_profile_to_congestion(
+        &mut self,
+        airtime_load_pct: i64,
+        tx_retry_pct: f64,
+        is_gaming: bool,
+        anti_cheat_active: bool,
+        apply_os: bool,
+    ) -> Option<String> {
+        if anti_cheat_active {
+            return None;
+        }
+        let target = Self::classify_congestion_tier(airtime_load_pct, tx_retry_pct, is_gaming);
+        self.active_congestion_tier = target;
+
+        if apply_os {
+            let pairs: Vec<String> = match target {
+                TcpCongestionTier::TightAntiBloat1Mb => vec![
+                    "net.inet.tcp.autorcvbufmax=2097152".into(),
+                    "net.inet.tcp.autosndbufmax=1048576".into(),
+                    "net.inet.tcp.recvspace=262144".into(),
+                    "net.inet.tcp.sendspace=131072".into(),
+                    "net.inet.tcp.mssdflt=1360".into(),
+                    "net.inet.tcp.delayed_ack=0".into(),
+                    "net.inet.tcp.rexmt_slop=20".into(),
+                    "net.inet.tcp.l4s=1".into(),
+                    "net.classq.fq_codel.enable_ecn=1".into(),
+                ],
+                TcpCongestionTier::Balanced4Mb => vec![
+                    "net.inet.tcp.autorcvbufmax=4194304".into(),
+                    "net.inet.tcp.autosndbufmax=4194304".into(),
+                    "net.inet.tcp.mssdflt=1412".into(),
+                    "net.inet.tcp.delayed_ack=0".into(),
+                    "net.inet.tcp.rexmt_slop=30".into(),
+                    "net.inet.tcp.l4s=1".into(),
+                    "net.classq.fq_codel.enable_ecn=1".into(),
+                ],
+                TcpCongestionTier::HighBdp32Mb => vec![
+                    "net.inet.tcp.autorcvbufmax=33554432".into(),
+                    "net.inet.tcp.autosndbufmax=33554432".into(),
+                    "net.inet.tcp.recvspace=2097152".into(),
+                    "net.inet.tcp.sendspace=2097152".into(),
+                    "net.inet.tcp.mssdflt=1452".into(),
+                    "net.inet.tcp.win_scale_factor=8".into(),
+                ],
+            };
+            if !write_sysctls(&pairs) {
+                return None;
+            }
+        }
+
+        Some(format!(
+            "● Adaptive TCP Profile -> {target:?} (Airtime {airtime_load_pct}%, Retry {tx_retry_pct:.1}%)"
+        ))
     }
 
     pub fn get_state(&self) -> HashMap<String, String> {
@@ -383,6 +465,39 @@ mod tests {
             elapsed < Duration::from_millis(1800),
             "Parallel edge pre-warmer took {:?}, expected <1800ms",
             elapsed
+        );
+    }
+
+    #[test]
+    fn test_adaptive_tcp_profile_classification_and_anticheat_lockout() {
+        assert_eq!(
+            KernelTuner::classify_congestion_tier(20, 0.5, false),
+            TcpCongestionTier::HighBdp32Mb
+        );
+        assert_eq!(
+            KernelTuner::classify_congestion_tier(50, 1.0, false),
+            TcpCongestionTier::Balanced4Mb
+        );
+        assert_eq!(
+            KernelTuner::classify_congestion_tier(72, 2.0, false),
+            TcpCongestionTier::TightAntiBloat1Mb
+        );
+        assert_eq!(
+            KernelTuner::classify_congestion_tier(15, 0.2, true),
+            TcpCongestionTier::TightAntiBloat1Mb
+        );
+
+        let mut tuner = KernelTuner::new("Wi-Fi", "en0");
+        assert!(tuner
+            .adapt_tcp_profile_to_congestion(75, 9.0, true, true, false)
+            .is_none());
+        let msg = tuner
+            .adapt_tcp_profile_to_congestion(75, 9.0, false, false, false)
+            .unwrap();
+        assert!(msg.contains("TightAntiBloat1Mb"));
+        assert_eq!(
+            tuner.active_congestion_tier,
+            TcpCongestionTier::TightAntiBloat1Mb
         );
     }
 }

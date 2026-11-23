@@ -3,6 +3,7 @@
 pub mod acoustic_radar;
 pub mod airtime;
 pub mod antilag;
+pub mod autopilot;
 pub mod bandwidth_shaper;
 pub mod captive;
 pub mod channel_advisor;

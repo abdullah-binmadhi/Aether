@@ -147,3 +147,110 @@ pub fn evaluate_roaming(tel: &Telemetry) -> RoamEval {
         verdict,
     }
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct RoamCooldown {
+    pub last_roam_at: Option<std::time::Instant>,
+    pub attempts: u32,
+}
+
+/// Actively steer to a higher-scoring 5GHz/6GHz sibling SSID when sticky-client
+/// is detected. Never runs while `is_game_locked` is true and enforces a 90s
+/// cooldown so active match sockets are never dropped or ping-ponged.
+pub fn execute_smart_roam(
+    interface: &str,
+    eval: &RoamEval,
+    wifi_password: &str,
+    is_game_locked: bool,
+    cooldown: &mut RoamCooldown,
+    apply_os: bool,
+) -> Option<String> {
+    if is_game_locked || !eval.sticky_client {
+        return None;
+    }
+    if let Some(last) = cooldown.last_roam_at {
+        if last.elapsed() < std::time::Duration::from_secs(90) {
+            return None;
+        }
+    }
+    let best = eval.best_candidate.as_ref()?;
+    if best.gain_score < 12 {
+        return None;
+    }
+
+    cooldown.last_roam_at = Some(std::time::Instant::now());
+    cooldown.attempts += 1;
+
+    if apply_os {
+        let out = if wifi_password.is_empty() {
+            super::cmd::run(
+                &["networksetup", "-setairportnetwork", interface, &best.ssid],
+                std::time::Duration::from_millis(3500),
+            )
+        } else {
+            super::cmd::run(
+                &[
+                    "networksetup",
+                    "-setairportnetwork",
+                    interface,
+                    &best.ssid,
+                    wifi_password,
+                ],
+                std::time::Duration::from_millis(3500),
+            )
+        };
+        if !out.success {
+            return None;
+        }
+    }
+
+    Some(format!(
+        "● Smart-Roamed to '{}' ({} Ch{}, {}dBm, +{} score)",
+        best.ssid,
+        best.band.label(),
+        best.channel_num,
+        best.signal_dbm,
+        best.gain_score
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_eval(sticky: bool, gain: i64) -> RoamEval {
+        RoamEval {
+            sticky_client: sticky,
+            active_score: 40,
+            best_candidate: Some(Candidate {
+                ssid: "HomeWiFi-5G".into(),
+                band: Band::Band5GHz,
+                channel_num: 36,
+                signal_dbm: -55,
+                score: 40 + gain,
+                gain_score: gain,
+            }),
+            verdict: "STICKY".into(),
+        }
+    }
+
+    #[test]
+    fn smart_roam_refuses_when_game_locked() {
+        let mut cd = RoamCooldown::default();
+        let eval = sample_eval(true, 18);
+        assert!(execute_smart_roam("en0", &eval, "", true, &mut cd, false).is_none());
+        assert_eq!(cd.attempts, 0);
+    }
+
+    #[test]
+    fn smart_roam_succeeds_and_enforces_cooldown() {
+        let mut cd = RoamCooldown::default();
+        let eval = sample_eval(true, 18);
+        let msg = execute_smart_roam("en0", &eval, "", false, &mut cd, false);
+        assert!(msg.is_some());
+        assert_eq!(cd.attempts, 1);
+        // Immediate second attempt is blocked by 90s cooldown
+        assert!(execute_smart_roam("en0", &eval, "", false, &mut cd, false).is_none());
+        assert_eq!(cd.attempts, 1);
+    }
+}

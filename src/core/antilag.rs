@@ -80,6 +80,59 @@ impl AntiLagEngine {
         }
     }
 
+    /// Physically brings down `awdl0` and `llw0` when privileged, plus sets AirDrop defaults.
+    pub fn enforce_awdl_down(&self, down: bool, apply_os: bool) -> String {
+        let action = if down { "down" } else { "up" };
+        if apply_os {
+            cmd::run(
+                &[
+                    "defaults",
+                    "write",
+                    "com.apple.NetworkBrowser",
+                    "DisableAirDrop",
+                    "-bool",
+                    if down { "YES" } else { "NO" },
+                ],
+                Duration::from_millis(1500),
+            );
+        }
+        if !self.root_authorized || !apply_os {
+            return if down {
+                "● User-space AirDrop Muted (press [S] to lock hardware awdl0/llw0 down)".into()
+            } else {
+                "○ User-space AirDrop Restored".into()
+            };
+        }
+
+        let check = cmd::run(&["ifconfig", "awdl0"], Duration::from_millis(400));
+        let is_up = check.stdout.contains("<UP,")
+            || check.stdout.contains(",UP,")
+            || check.stdout.contains(",UP>");
+        if down && is_up {
+            let _ = cmd::ok(
+                &["sudo", "-n", "ifconfig", "awdl0", "down"],
+                Duration::from_millis(500),
+            );
+            let _ = cmd::ok(
+                &["sudo", "-n", "ifconfig", "llw0", "down"],
+                Duration::from_millis(500),
+            );
+            "● Hardware awdl0 & llw0 LOCKED DOWN (0ms off-channel scan spikes)".into()
+        } else if !down && !is_up {
+            let _ = cmd::ok(
+                &["sudo", "-n", "ifconfig", "awdl0", "up"],
+                Duration::from_millis(500),
+            );
+            let _ = cmd::ok(
+                &["sudo", "-n", "ifconfig", "llw0", "up"],
+                Duration::from_millis(500),
+            );
+            "○ Hardware awdl0 & llw0 RESTORED".into()
+        } else {
+            format!("● AWDL/LLW state verified ({action})")
+        }
+    }
+
     /// Toggle Zero-Lag. Returns the status string. `tel` is updated in sync.
     pub fn toggle_awdl(&mut self, tel: Option<&mut Telemetry>) -> String {
         let enable = !self.zero_lag_active;
@@ -90,17 +143,7 @@ impl AntiLagEngine {
             t.alerts
                 .retain(|a| !a.contains("AWDL") && !a.contains("Zero-Lag"));
         }
-        cmd::run(
-            &[
-                "defaults",
-                "write",
-                "com.apple.NetworkBrowser",
-                "DisableAirDrop",
-                "-bool",
-                if enable { "YES" } else { "NO" },
-            ],
-            Duration::from_millis(1500),
-        );
+        let awdl_msg = self.enforce_awdl_down(enable, !cfg!(test));
         self.toggle_sync_daemons(enable);
         let clamped = if enable {
             Self::debloat_background_queues()
@@ -109,7 +152,7 @@ impl AntiLagEngine {
         };
         DnsEngine::flush_cache();
         if enable {
-            format!("● ZERO-LAG MODE ENABLED ({clamped} background socket queues clamped to WMM Scavenger).")
+            format!("{awdl_msg} │ {clamped} background socket queues clamped to WMM Scavenger.")
         } else {
             "○ STANDARD MODE RESTORED (AirDrop & background sync resumed).".into()
         }
@@ -126,7 +169,7 @@ impl AntiLagEngine {
 
     /// Install passwordless sudoers + lock kernel tuning via an osascript GUI prompt.
     pub fn authorize_root_privileges(&mut self) -> String {
-        let shell_cmd = "echo '%admin ALL=(ALL) NOPASSWD: /usr/sbin/sysctl, /sbin/ifconfig, /usr/sbin/ipconfig, /usr/bin/killall, /usr/bin/renice, /usr/sbin/purge, /usr/bin/tmutil' | tee /etc/sudoers.d/aether /etc/sudoers.d/wifi-tui && chmod 0440 /etc/sudoers.d/aether /etc/sudoers.d/wifi-tui && sysctl -w net.qos.policy.wifi_enabled=1 net.qos.policy.capable_enabled=1 net.qos.policy.restrict_avapps=0 net.inet.tcp.delayed_ack=0 net.inet.tcp.rexmt_slop=30 net.inet.tcp.fastopen=3 net.inet.tcp.l4s=1 net.classq.fq_codel.enable_ecn=1 net.inet.tcp.cubic_fast_convergence=1 net.inet.tcp.autorcvbufmax=33554432 net.inet.tcp.autosndbufmax=33554432 net.inet.tcp.recvspace=2097152 net.inet.tcp.sendspace=2097152 net.inet.tcp.win_scale_factor=8 net.inet.tcp.mssdflt=1452 net.inet.tcp.v6mssdflt=1432 && dscacheutil -flushcache && killall -HUP mDNSResponder";
+        let shell_cmd = "echo '%admin ALL=(ALL) NOPASSWD: /usr/sbin/sysctl, /sbin/ifconfig, /sbin/pfctl, /usr/sbin/dnctl, /usr/sbin/ipconfig, /usr/bin/killall, /usr/bin/renice, /usr/sbin/purge, /usr/bin/tmutil' | tee /etc/sudoers.d/aether /etc/sudoers.d/wifi-tui && chmod 0440 /etc/sudoers.d/aether /etc/sudoers.d/wifi-tui && sysctl -w net.qos.policy.wifi_enabled=1 net.qos.policy.capable_enabled=1 net.qos.policy.restrict_avapps=0 net.inet.tcp.delayed_ack=0 net.inet.tcp.rexmt_slop=30 net.inet.tcp.fastopen=3 net.inet.tcp.l4s=1 net.classq.fq_codel.enable_ecn=1 net.inet.tcp.cubic_fast_convergence=1 net.inet.tcp.autorcvbufmax=33554432 net.inet.tcp.autosndbufmax=33554432 net.inet.tcp.recvspace=2097152 net.inet.tcp.sendspace=2097152 net.inet.tcp.win_scale_factor=8 net.inet.tcp.mssdflt=1452 net.inet.tcp.v6mssdflt=1432 && dscacheutil -flushcache && killall -HUP mDNSResponder";
         let script = format!("do shell script \"{shell_cmd}\" with administrator privileges");
         let out = cmd::run(&["osascript", "-e", &script], Duration::from_secs(45));
         if out.success {

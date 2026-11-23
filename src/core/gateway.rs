@@ -178,6 +178,61 @@ impl GatewayRebooter {
             (false, format!("[!] Gateway {gw}: Remote reboot unsupported via UPnP. Please visit http://{gw} directly."))
         }
     }
+
+    pub fn build_add_port_mapping_xml(
+        service_type: &str,
+        local_ip: &str,
+        udp_port: u16,
+        lease_secs: u32,
+    ) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n\
+             <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\r\n\
+               <s:Body>\r\n\
+                 <u:AddPortMapping xmlns:u=\"{service_type}\">\r\n\
+                   <NewRemoteHost></NewRemoteHost>\r\n\
+                   <NewExternalPort>{udp_port}</NewExternalPort>\r\n\
+                   <NewProtocol>UDP</NewProtocol>\r\n\
+                   <NewInternalPort>{udp_port}</NewInternalPort>\r\n\
+                   <NewInternalClient>{local_ip}</NewInternalClient>\r\n\
+                   <NewEnabled>1</NewEnabled>\r\n\
+                   <NewPortMappingDescription>Aether-VIP-GameFlow</NewPortMappingDescription>\r\n\
+                   <NewLeaseDuration>{lease_secs}</NewLeaseDuration>\r\n\
+                 </u:AddPortMapping>\r\n\
+               </s:Body>\r\n\
+             </s:Envelope>"
+        )
+    }
+
+    /// Requests a dedicated UPnP IGD `AddPortMapping` lease so the router NAT table
+    /// maintains a direct fast-path mapping for the host's gaming UDP port.
+    pub fn lease_priority_game_flow(
+        &mut self,
+        local_ip: &str,
+        udp_port: u16,
+        lease_secs: u32,
+    ) -> (bool, String) {
+        if local_ip.is_empty() || local_ip == "N/A" {
+            return (false, "No local IP for UPnP fast-path lease.".into());
+        }
+        let Some((control_url, service_type)) =
+            self.discover_control_url(Duration::from_millis(1200))
+        else {
+            return (
+                false,
+                "Router UPnP IGD unavailable (relying on 50Hz NAT keepalive).".into(),
+            );
+        };
+        let body =
+            Self::build_add_port_mapping_xml(&service_type, local_ip, udp_port, lease_secs);
+        match post_soap(&control_url, &service_type, "AddPortMapping", &body) {
+            Ok(_) => (
+                true,
+                format!("● Router UPnP Fast-Path Lease Active ({local_ip}:{udp_port} UDP, {lease_secs}s)"),
+            ),
+            Err(e) => (false, format!("UPnP AddPortMapping skipped: {e}")),
+        }
+    }
 }
 
 fn post_soap(
@@ -227,4 +282,31 @@ fn tag(xml: &str, name: &str) -> Option<String> {
     let s = xml.find(&open)? + open.len();
     let e = xml[s..].find(&close)? + s;
     Some(xml[s..e].trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GatewayRebooter;
+
+    #[test]
+    fn add_port_mapping_xml_contains_expected_fields() {
+        let xml = GatewayRebooter::build_add_port_mapping_xml(
+            "urn:schemas-upnp-org:service:WANIPConnection:1",
+            "192.168.1.42",
+            5180,
+            3600,
+        );
+        assert!(xml.contains("AddPortMapping"));
+        assert!(xml.contains("<NewInternalClient>192.168.1.42</NewInternalClient>"));
+        assert!(xml.contains("<NewExternalPort>5180</NewExternalPort>"));
+        assert!(xml.contains("<NewLeaseDuration>3600</NewLeaseDuration>"));
+    }
+
+    #[test]
+    fn lease_priority_rejects_missing_ip() {
+        let mut gw = GatewayRebooter::new("192.168.1.1");
+        let (ok, msg) = gw.lease_priority_game_flow("N/A", 5180, 3600);
+        assert!(!ok);
+        assert!(msg.contains("No local IP"));
+    }
 }

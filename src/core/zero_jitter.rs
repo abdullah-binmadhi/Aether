@@ -327,6 +327,14 @@ impl ZeroJitterBackend for DarwinZeroJitter {
                 ],
                 Duration::from_millis(600),
             );
+            let _ = cmd::ok(
+                &["sudo", "-n", "ifconfig", "awdl0", "down"],
+                Duration::from_millis(400),
+            );
+            let _ = cmd::ok(
+                &["sudo", "-n", "ifconfig", "llw0", "down"],
+                Duration::from_millis(400),
+            );
             let _ = cmd::run(&["dscacheutil", "-flushcache"], Duration::from_millis(500));
         }
         state.p2p_disabled = true;
@@ -375,6 +383,14 @@ impl ZeroJitterBackend for DarwinZeroJitter {
                     "NO",
                 ],
                 Duration::from_millis(600),
+            );
+            let _ = cmd::ok(
+                &["sudo", "-n", "ifconfig", "awdl0", "up"],
+                Duration::from_millis(400),
+            );
+            let _ = cmd::ok(
+                &["sudo", "-n", "ifconfig", "llw0", "up"],
+                Duration::from_millis(400),
             );
         }
         state.tier1_enabled = false;

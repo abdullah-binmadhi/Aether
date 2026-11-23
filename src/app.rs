@@ -174,6 +174,7 @@ pub struct App {
     pub security: SecurityGuard,
     pub router_bot: RouterBot,
     pub orchestrator: Orchestrator,
+    pub autopilot: crate::core::autopilot::AutoPilotEngine,
     pub preset: PresetEngine,
     pub device_collector: crate::core::device_info::DeviceCollector,
     pub device_info: crate::core::device_info::DeviceInfo,
@@ -281,6 +282,8 @@ impl App {
         let mut privacy_fortress = PrivacyFortress::new();
         let privacy_data = privacy_fortress.sample(false);
 
+        let orchestrator = Orchestrator::new(interface, "Wi-Fi");
+        let autopilot = crate::core::autopilot::AutoPilotEngine::new(&scope.gateway_ip);
         App {
             collector,
             scope,
@@ -301,7 +304,8 @@ impl App {
             socket_matrix: SocketMatrixEngine::new(60),
             security: SecurityGuard::new(interface),
             router_bot,
-            orchestrator: Orchestrator::new(interface, "Wi-Fi"),
+            orchestrator,
+            autopilot,
             preset: PresetEngine::new(),
             device_collector,
             device_info,
@@ -396,6 +400,43 @@ impl App {
         // don't need it every tick), apply safe tweaks on entry, revert on exit.
         if self.tick.is_multiple_of(3) {
             self.game_mode_tick();
+            self.autopilot_tick();
+        }
+    }
+
+    /// Closed-loop AutoPilot evaluation: selects the optimal feature bundle for
+    /// current congestion, streaming, or gaming conditions and offloads OS changes
+    /// to a background thread so the TUI render loop never stalls.
+    fn autopilot_tick(&mut self) {
+        if !self.profiles.auto_pilot_enabled() || !self.autopilot.enabled {
+            return;
+        }
+        self.autopilot.refresh_anti_cheat();
+        let next = self.autopilot.evaluate_next_state(
+            &self.telemetry,
+            &self.scope_snap,
+            self.game_mode.active(),
+        );
+        if self.autopilot.should_transition(next) {
+            self.autopilot.mark_transitioned(next);
+            if cfg!(test) {
+                return;
+            }
+            let iface = self.collector.interface.clone();
+            let tel = self.telemetry.clone();
+            let scope = self.scope_snap.clone();
+            let caps = self.autopilot.caps.clone();
+            let cooldown = self.autopilot.roam_cooldown.clone();
+            self.spawn_bg(move || {
+                let mut engine = crate::core::autopilot::AutoPilotEngine::new(&tel.gateway);
+                engine.caps = caps;
+                engine.roam_cooldown = cooldown;
+                let msg = engine.execute_transition(next, &iface, &tel, &scope, true);
+                ActionOutcome {
+                    status: msg,
+                    ..Default::default()
+                }
+            });
         }
     }
 
@@ -580,6 +621,7 @@ impl App {
     pub fn teardown(&mut self) {
         // Restore AirDrop etc. if Game Mode was active, and unfreeze processes.
         crate::core::game_mode::force_restore(&mut self.game_mode);
+        self.autopilot.teardown(&self.collector.interface, !cfg!(test));
         let resumed = self.procmon.resume_all();
         if resumed > 0 {
             self.status_msg = format!("Resumed {resumed} frozen process(es) on exit.");

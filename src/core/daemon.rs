@@ -96,7 +96,9 @@ pub fn status() -> String {
 /// This is what the installed LaunchAgent executes via `aether --daemon`.
 pub fn run_autonomous_daemon(interface: &str, interval_sec: u64, max_ticks: Option<u64>) -> i32 {
     use super::antilag::AntiLagEngine;
+    use super::autopilot::AutoPilotEngine;
     use super::collector::Collector;
+    use super::game_mode;
     use super::history::HistoryLogger;
     use super::hotspot::HotspotEngine;
     use super::kernel_tuner::KernelTuner;
@@ -115,6 +117,7 @@ pub fn run_autonomous_daemon(interface: &str, interval_sec: u64, max_ticks: Opti
     let mut wake = WakeReconnector::new(interface);
     let mut history = HistoryLogger::new();
     let profiles = ProfileManager::new();
+    let mut autopilot = AutoPilotEngine::new(&scope.gateway_ip);
 
     let mut last_ssid = String::new();
     let mut last_gw = String::new();
@@ -153,7 +156,16 @@ pub fn run_autonomous_daemon(interface: &str, interval_sec: u64, max_ticks: Opti
             println!("[{}] Network Switch ({curr_ssid}) -> {doc}", clock());
         }
 
-        // 3. Periodic sticky-client roam + dead-zone logging.
+        // 3. Closed-loop AutoPilot evaluation + sticky-client roam check.
+        if tick.is_multiple_of(3) && profiles.auto_pilot_enabled() {
+            autopilot.refresh_anti_cheat();
+            let game_running = game_mode::detect_game().is_some();
+            let next_ap = autopilot.evaluate_next_state(&tel, &snap, game_running);
+            if autopilot.should_transition(next_ap) {
+                let ap_msg = autopilot.execute_transition(next_ap, interface, &tel, &snap, true);
+                println!("[{}] {ap_msg}", clock());
+            }
+        }
         if tick.is_multiple_of(4) {
             let roam = roaming::evaluate_roaming(&tel);
             if roam.sticky_client {

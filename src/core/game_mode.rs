@@ -39,6 +39,21 @@ pub const GAME_PROCESSES: &[&str] = &[
     "BEService",
 ];
 
+/// Kernel anti-cheat processes that require strict zero-kernel-touch mode
+/// (no sysctl writes, no SIGSTOP, no live MTU mutations).
+pub const ANTI_CHEAT_PROCESSES: &[&str] =
+    &["vgc", "vgk", "vgtray", "EasyAntiCheat", "BEService"];
+
+/// Returns true if any kernel anti-cheat daemon/driver is active.
+pub fn detect_anti_cheat() -> bool {
+    for name in ANTI_CHEAT_PROCESSES {
+        if cmd::ok(&["pgrep", "-x", name], Duration::from_millis(300)) {
+            return true;
+        }
+    }
+    false
+}
+
 /// The current Game Mode state, owned by `App`.
 #[derive(Clone, Default)]
 pub struct GameMode {
